@@ -95,4 +95,6 @@ dotnet run --project MediaPager.App.Api/MediaPager.App.Api.csproj   # http://loc
 The companion SPA is `MediaPager.App.Ui` (`npm run dev`, `http://localhost:5173`).
 
 The production container embeds the built SPA in the API's `wwwroot` and serves the UI and
-API on one origin; no separate web container or reverse proxy is required.
+API on one origin; no separate web container or reverse proxy is required. The runtime
+image includes Git and the .NET SDK because community plugin installs clone and build
+plugins inside the container.
