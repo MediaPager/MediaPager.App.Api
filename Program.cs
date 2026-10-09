@@ -220,10 +220,13 @@ app.Services.GetRequiredService<PluginRegistry>().Reset(
     communityPlugins.Select(plugin => plugin.Descriptor.Id));
 
 app.UseCors();
+app.UseDefaultFiles();
+app.UseStaticFiles();
 app.UseAuthentication();
 app.UseAuthorization();
 
 app.MapControllers();
+app.MapFallbackToFile("index.html").AllowAnonymous();
 
 await using (var scope = app.Services.CreateAsyncScope())
 {
