@@ -16,6 +16,7 @@ builder.Configuration.AddJsonFile(Path.Combine(AppContext.BaseDirectory, "plugin
 builder.Configuration.AddJsonFile(Path.Combine(AppContext.BaseDirectory, "plugins.community.json"), optional: true, reloadOnChange: false);
 builder.Configuration.AddEnvironmentVariables(prefix: "MEDIAPAGER_");
 
+var databaseProvider = (builder.Configuration["Database:Provider"] ?? "Sqlite").Trim().ToLowerInvariant();
 var configuredDatabasePath = Environment.GetEnvironmentVariable("MEDIAPAGER_DB_PATH");
 if (string.IsNullOrWhiteSpace(configuredDatabasePath))
     configuredDatabasePath = builder.Configuration["Auth:DatabasePath"];
@@ -26,53 +27,96 @@ if (string.IsNullOrWhiteSpace(windowsAppData))
 var defaultDatabaseDirectory = OperatingSystem.IsWindows()
     ? Path.Combine(windowsAppData, "MediaPager", "db")
     : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".MediaPager", "db");
-var databasePath = string.IsNullOrWhiteSpace(configuredDatabasePath)
-    ? string.IsNullOrWhiteSpace(configuredConnectionString)
-        ? Path.Combine(defaultDatabaseDirectory, "mediapager.db")
-        : new SqliteConnectionStringBuilder(configuredConnectionString).DataSource
-    : configuredDatabasePath;
-if (string.IsNullOrWhiteSpace(databasePath))
-    throw new InvalidOperationException("The configured auth database path is empty.");
-databasePath = Path.GetFullPath(databasePath);
-var databaseDirectory = Path.GetDirectoryName(databasePath)
-    ?? throw new InvalidOperationException("The configured auth database path must include a directory.");
-Directory.CreateDirectory(databaseDirectory);
+var defaultDataDirectory = Path.GetDirectoryName(defaultDatabaseDirectory)!;
+string persistentDataDirectory;
 
-Console.Error.WriteLine($"Auth database: {databasePath}");
-var legacyDatabasePaths = new[]
+switch (databaseProvider)
 {
-    Path.Combine(builder.Environment.ContentRootPath, "mediapager-auth.db"),
-    Path.Combine(defaultDatabaseDirectory, "mediapager-auth.db"),
-};
-foreach (var legacyDatabasePath in legacyDatabasePaths)
-{
-    if (File.Exists(databasePath))
+    case "sqlite":
+    case "sqlite3":
+        var sqliteOptions = new SqliteConnectionStringBuilder(configuredConnectionString ?? string.Empty);
+        if (!string.IsNullOrWhiteSpace(configuredDatabasePath))
+            sqliteOptions.DataSource = configuredDatabasePath;
+        else if (string.IsNullOrWhiteSpace(sqliteOptions.DataSource))
+            sqliteOptions.DataSource = Path.Combine(defaultDatabaseDirectory, "mediapager.db");
+
+        var sqliteIsInMemory = sqliteOptions.Mode == SqliteOpenMode.Memory || sqliteOptions.DataSource == ":memory:";
+        string? sqliteDatabasePath = null;
+        if (!sqliteIsInMemory)
+        {
+            sqliteDatabasePath = Path.GetFullPath(sqliteOptions.DataSource);
+            sqliteOptions.DataSource = sqliteDatabasePath;
+            persistentDataDirectory = Path.GetDirectoryName(sqliteDatabasePath)
+                ?? throw new InvalidOperationException("The configured SQLite database path must include a directory.");
+            Directory.CreateDirectory(persistentDataDirectory);
+
+            Console.Error.WriteLine($"Auth database provider: SQLite ({sqliteDatabasePath})");
+            var legacyDatabasePaths = new[]
+            {
+                Path.Combine(builder.Environment.ContentRootPath, "mediapager-auth.db"),
+                Path.Combine(defaultDatabaseDirectory, "mediapager-auth.db"),
+            };
+            foreach (var legacyDatabasePath in legacyDatabasePaths)
+            {
+                if (File.Exists(sqliteDatabasePath))
+                    break;
+                if (!File.Exists(legacyDatabasePath) ||
+                    string.Equals(Path.GetFullPath(legacyDatabasePath), sqliteDatabasePath, StringComparison.OrdinalIgnoreCase))
+                    continue;
+                try
+                {
+                    using var source = new SqliteConnection(new SqliteConnectionStringBuilder
+                    {
+                        DataSource = legacyDatabasePath,
+                        Mode = SqliteOpenMode.ReadOnly,
+                    }.ToString());
+                    using var destination = new SqliteConnection(new SqliteConnectionStringBuilder
+                    {
+                        DataSource = sqliteDatabasePath,
+                        Mode = SqliteOpenMode.ReadWriteCreate,
+                    }.ToString());
+                    source.Open();
+                    destination.Open();
+                    source.BackupDatabase(destination);
+                    Console.Error.WriteLine($"Migrated the existing auth database from {legacyDatabasePath}.");
+                }
+                catch (SqliteException exception)
+                {
+                    Console.Error.WriteLine($"Could not migrate the existing auth database: {exception.Message}");
+                    throw;
+                }
+            }
+        }
+        else
+        {
+            persistentDataDirectory = defaultDataDirectory;
+            Directory.CreateDirectory(persistentDataDirectory);
+            Console.Error.WriteLine("Auth database provider: SQLite (in-memory)");
+        }
+
+        var sqliteConnectionString = sqliteOptions.ToString();
+        builder.Services.AddDbContext<AuthDbContext>(options => options.UseSqlite(
+            sqliteConnectionString,
+            sqlite => sqlite.MigrationsAssembly(typeof(AuthDbContext).Assembly.GetName().Name)));
         break;
-    if (!File.Exists(legacyDatabasePath) ||
-        string.Equals(Path.GetFullPath(legacyDatabasePath), databasePath, StringComparison.OrdinalIgnoreCase))
-        continue;
-    try
-    {
-        using var source = new SqliteConnection(new SqliteConnectionStringBuilder
-        {
-            DataSource = legacyDatabasePath,
-            Mode = SqliteOpenMode.ReadOnly,
-        }.ToString());
-        using var destination = new SqliteConnection(new SqliteConnectionStringBuilder
-        {
-            DataSource = databasePath,
-            Mode = SqliteOpenMode.ReadWriteCreate,
-        }.ToString());
-        source.Open();
-        destination.Open();
-        source.BackupDatabase(destination);
-        Console.Error.WriteLine($"Migrated the existing auth database from {legacyDatabasePath}.");
-    }
-    catch (SqliteException exception)
-    {
-        Console.Error.WriteLine($"Could not migrate the existing auth database: {exception.Message}");
-        throw;
-    }
+
+    case "postgres":
+    case "postgresql":
+        if (!string.IsNullOrWhiteSpace(configuredDatabasePath))
+            throw new InvalidOperationException("MEDIAPAGER_DB_PATH/Auth:DatabasePath only applies to SQLite; configure ConnectionStrings:AuthDatabase for PostgreSQL.");
+        if (string.IsNullOrWhiteSpace(configuredConnectionString))
+            throw new InvalidOperationException("ConnectionStrings:AuthDatabase is required when Database:Provider is PostgreSQL.");
+
+        persistentDataDirectory = defaultDataDirectory;
+        Directory.CreateDirectory(persistentDataDirectory);
+        Console.Error.WriteLine("Auth database provider: PostgreSQL");
+        builder.Services.AddDbContext<AuthDbContext>(options => options.UseNpgsql(
+            configuredConnectionString,
+            postgres => postgres.MigrationsAssembly(typeof(Program).Assembly.GetName().Name)));
+        break;
+
+    default:
+        throw new InvalidOperationException($"Unknown Database:Provider '{databaseProvider}'. Supported providers: Sqlite, PostgreSQL.");
 }
 
 var jwtIssuer = builder.Configuration["Auth:Issuer"] ?? "MediaPager.App.Api";
@@ -88,8 +132,13 @@ if (!string.IsNullOrWhiteSpace(configuredSigningKey))
 }
 else
 {
-    // Keep tokens valid across restarts by storing a generated key next to the database.
-    var signingKeyPath = Path.Combine(databaseDirectory, "signing.key");
+    // Keep tokens valid across restarts by storing a generated key in persistent app data.
+    var signingKeyPath = builder.Configuration["Auth:SigningKeyPath"];
+    if (string.IsNullOrWhiteSpace(signingKeyPath))
+        signingKeyPath = Path.Combine(persistentDataDirectory, "signing.key");
+    else
+        signingKeyPath = Path.GetFullPath(signingKeyPath);
+    Directory.CreateDirectory(Path.GetDirectoryName(signingKeyPath)!);
     if (File.Exists(signingKeyPath))
     {
         signingKeyBytes = await File.ReadAllBytesAsync(signingKeyPath);
@@ -99,13 +148,11 @@ else
         signingKeyBytes = RandomNumberGenerator.GetBytes(64);
         await File.WriteAllBytesAsync(signingKeyPath, signingKeyBytes);
         if (!OperatingSystem.IsWindows()) File.SetUnixFileMode(signingKeyPath, UnixFileMode.UserRead | UnixFileMode.UserWrite);
-        Console.Error.WriteLine("Auth:SigningKey is not configured; generated and stored one next to the database.");
+        Console.Error.WriteLine($"Auth:SigningKey is not configured; generated and stored one at {signingKeyPath}.");
     }
 }
 var signingKey = new SymmetricSecurityKey(signingKeyBytes);
 builder.Services.AddSingleton(new AuthTokenConfiguration(jwtIssuer, signingKey));
-builder.Services.AddDbContext<AuthDbContext>(options =>
-    options.UseSqlite($"Data Source={databasePath}"));
 builder.Services.AddIdentityCore<AppUser>(options =>
     {
         options.User.RequireUniqueEmail = true;

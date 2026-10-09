@@ -75,10 +75,14 @@ dotnet user-secrets set "Auth:SigningKey" "$(openssl rand -base64 48)" --project
   this repo. Gmail and Office 365 are optional installs (see
   `Plugins:Official` in `appsettings.json` for the links).
 
-- **Database:** `%APPDATA%/MediaPager/db/mediapager.db` (Windows) or
-  `~/.MediaPager/db/mediapager.db` (macOS/Linux). Override with `MEDIAPAGER_DB_PATH` or
-  `MEDIAPAGER_Auth__DatabasePath`. EF migrations apply at startup. The JWT signing key
-  persists to `signing.key` beside the DB unless `MEDIAPAGER_EKEY` is configured.
+- **Database:** SQLite is the default (`%APPDATA%/MediaPager/db/mediapager.db` on Windows,
+  `~/.MediaPager/db/mediapager.db` on macOS/Linux). Set `MEDIAPAGER_Database__Provider` to
+  `PostgreSQL` and provide `MEDIAPAGER_ConnectionStrings__AuthDatabase` to use PostgreSQL.
+  Each provider has its own EF migration set for the same `AuthDbContext`; pending migrations
+  apply automatically at startup. `MEDIAPAGER_DB_PATH` and `MEDIAPAGER_Auth__DatabasePath`
+  are SQLite-only overrides. Changing providers migrates the schema in the selected database;
+  it does not copy rows between databases. The JWT signing key persists beside a SQLite DB,
+  or at `MEDIAPAGER_Auth__SigningKeyPath` when configured.
 - **Initial account:** `MEDIAPAGER_SEED_USER` sets the first super-admin email/login and
   `MEDIAPAGER_SEED_PASS` optionally supplies its initial password. These apply only when
   the first account is created.
