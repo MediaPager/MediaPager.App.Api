@@ -6,7 +6,7 @@
           "id": "mediapager.stream.local",
           "name": "Local",
           "category": "stream",
-          "repo": "https://github.com/nobugsgiven/dev.nobugsgiven.apps.MediaPager.Plugins.Stream.Local",
+          "repo": "https://github.com/MediaPager/MediaPager.Plugins.Stream.Local",
           "assembly": "MediaPager.Plugins.Stream.Local",
           "systemRequired": true
         },
@@ -14,7 +14,7 @@
           "id": "mediapager.search.local",
           "name": "Local library",
           "category": "search",
-          "repo": "https://github.com/nobugsgiven/dev.nobugsgiven.apps.MediaPager.Plugins.Search.Local",
+          "repo": "https://github.com/MediaPager/MediaPager.Plugins.Search.Local",
           "assembly": "MediaPager.Plugins.Search.Local",
           "systemRequired": true
         },
@@ -22,7 +22,7 @@
           "id": "mediapager.metadata.tmdb",
           "name": "TMDB",
           "category": "metadata",
-          "repo": "https://github.com/nobugsgiven/dev.nobugsgiven.apps.MediaPager.Plugins.Search.Tmdb",
+          "repo": "https://github.com/MediaPager/MediaPager.Plugins.Search.Tmdb",
           "assembly": "MediaPager.Plugins.Search.Tmdb",
           "systemRequired": true
         },
@@ -30,42 +30,42 @@
           "id": "mediapager.subtitles.opensubtitles",
           "name": "OpenSubtitles",
           "category": "subtitles",
-          "repo": "https://github.com/nobugsgiven/dev.nobugsgiven.apps.MediaPager.Plugins.Subtitles.OpenSubtitles",
+          "repo": "https://github.com/MediaPager/MediaPager.Plugins.Subtitles.OpenSubtitles",
           "assembly": "MediaPager.Plugins.Subtitles.OpenSubtitles"
         },
         {
           "id": "mediapager.subtitles.subdl",
           "name": "Subdl",
           "category": "subtitles",
-          "repo": "https://github.com/nobugsgiven/dev.nobugsgiven.apps.MediaPager.Plugins.Subtitles.Subdl",
+          "repo": "https://github.com/MediaPager/MediaPager.Plugins.Subtitles.Subdl",
           "assembly": "MediaPager.Plugins.Subtitles.Subdl"
         },
         {
           "id": "mediapager.email.smtp",
           "name": "SMTP",
           "category": "email",
-          "repo": "https://github.com/nobugsgiven/dev.nobugsgiven.apps.MediaPager.Plugins.Email.Smtp",
+          "repo": "https://github.com/MediaPager/MediaPager.Plugins.Email.Smtp",
           "assembly": "MediaPager.Plugins.Email.Smtp"
         },
         {
           "id": "mediapager.email.mailgun",
           "name": "Mailgun",
           "category": "email",
-          "repo": "https://github.com/nobugsgiven/dev.nobugsgiven.apps.MediaPager.Plugins.Email.MailGun",
+          "repo": "https://github.com/MediaPager/MediaPager.Plugins.Email.MailGun",
           "assembly": "MediaPager.Plugins.Email.MailGun"
         },
         {
           "id": "mediapager.email.gmail",
           "name": "Gmail",
           "category": "email",
-          "repo": "https://github.com/nobugsgiven/dev.nobugsgiven.apps.MediaPager.Plugins.Email.Gmail",
+          "repo": "https://github.com/MediaPager/MediaPager.Plugins.Email.Gmail",
           "assembly": "MediaPager.Plugins.Email.Gmail"
         },
         {
           "id": "mediapager.email.office365",
           "name": "Office 365",
           "category": "email",
-          "repo": "https://github.com/nobugsgiven/dev.nobugsgiven.apps.MediaPager.Plugins.Email.Office365",
+          "repo": "https://github.com/MediaPager/MediaPager.Plugins.Email.Office365",
           "assembly": "MediaPager.Plugins.Email.Office365"
         }
       ]

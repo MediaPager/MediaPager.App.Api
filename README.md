@@ -62,7 +62,7 @@ plugin-UI asset endpoints are public. The seeded account email defaults to
 ## Configuration
 
 From `appsettings.json`, environment variables, and user-secrets. Keep credentials out of
-committed files. `MPAGER_`-prefixed env vars override JSON and secrets (`__` for nesting).
+committed files. `MEDIAPAGER_`-prefixed env vars override JSON and secrets (`__` for nesting).
 
 ```sh
 # Stable JWT signing key (else a temp key is generated per restart)
@@ -76,9 +76,14 @@ dotnet user-secrets set "Auth:SigningKey" "$(openssl rand -base64 48)" --project
   `Plugins:Official` in `appsettings.json` for the links).
 
 - **Database:** `%APPDATA%/MediaPager/db/mediapager.db` (Windows) or
-  `~/.MediaPager/db/mediapager.db` (macOS/Linux). Override with `MEDIAPAGER_DB_PATH`,
-  then `MPAGER_AUTH_DB_PATH` / `Auth:DatabasePath`. EF migrations apply at startup. The JWT
-  signing key persists to `signing.key` beside the DB.
+  `~/.MediaPager/db/mediapager.db` (macOS/Linux). Override with `MEDIAPAGER_DB_PATH` or
+  `MEDIAPAGER_Auth__DatabasePath`. EF migrations apply at startup. The JWT signing key
+  persists to `signing.key` beside the DB unless `MEDIAPAGER_EKEY` is configured.
+- **Initial account:** `MEDIAPAGER_SEED_USER` sets the first super-admin email/login and
+  `MEDIAPAGER_SEED_PASS` optionally supplies its initial password. These apply only when
+  the first account is created.
+- **TMDB:** `MEDIAPAGER_TMDB_API_KEY` supplies the TMDB plugin key when no value is saved
+  in the plugin settings.
 - **`Frontend:BaseUrl`** (default `http://localhost:5173`) — used in email links.
 
 ## Run

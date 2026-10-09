@@ -14,11 +14,9 @@ var builder = WebApplication.CreateBuilder(args);
 // Plugin metadata lists, extracted so appsettings.json stays a thin Required-by-id file.
 builder.Configuration.AddJsonFile(Path.Combine(AppContext.BaseDirectory, "plugins.official.json"), optional: false, reloadOnChange: false);
 builder.Configuration.AddJsonFile(Path.Combine(AppContext.BaseDirectory, "plugins.community.json"), optional: true, reloadOnChange: false);
-builder.Configuration.AddEnvironmentVariables(prefix: "MPAGER_");
+builder.Configuration.AddEnvironmentVariables(prefix: "MEDIAPAGER_");
 
 var configuredDatabasePath = Environment.GetEnvironmentVariable("MEDIAPAGER_DB_PATH");
-if (string.IsNullOrWhiteSpace(configuredDatabasePath))
-    configuredDatabasePath = Environment.GetEnvironmentVariable("MPAGER_AUTH_DB_PATH");
 if (string.IsNullOrWhiteSpace(configuredDatabasePath))
     configuredDatabasePath = builder.Configuration["Auth:DatabasePath"];
 var configuredConnectionString = builder.Configuration.GetConnectionString("AuthDatabase");
@@ -78,7 +76,9 @@ foreach (var legacyDatabasePath in legacyDatabasePaths)
 }
 
 var jwtIssuer = builder.Configuration["Auth:Issuer"] ?? "MediaPager.App.Api";
-var configuredSigningKey = builder.Configuration["Auth:SigningKey"];
+var configuredSigningKey = Environment.GetEnvironmentVariable("MEDIAPAGER_EKEY");
+if (string.IsNullOrWhiteSpace(configuredSigningKey))
+    configuredSigningKey = builder.Configuration["Auth:SigningKey"];
 byte[] signingKeyBytes;
 if (!string.IsNullOrWhiteSpace(configuredSigningKey))
 {
@@ -255,7 +255,9 @@ await using (var scope = app.Services.CreateAsyncScope())
     }
 
     var users = scope.ServiceProvider.GetRequiredService<UserManager<AppUser>>();
-    var seedEmail = builder.Configuration["Auth:SeedEmail"] ?? "admin@mediapager.local";
+    var seedEmail = Environment.GetEnvironmentVariable("MEDIAPAGER_SEED_USER");
+    if (string.IsNullOrWhiteSpace(seedEmail))
+        seedEmail = builder.Configuration["Auth:SeedEmail"] ?? "admin@mediapager.local";
     // Only seed when the seed email is free AND no super-admin exists yet: an existing
     // super-admin may have changed their email (Profile → Account), which must not cause
     // a second super-admin (with a fresh temporary password) to be created on restart.
@@ -268,7 +270,9 @@ await using (var scope = app.Services.CreateAsyncScope())
         const string digits = "23456789";
         const string symbols = "!@$%*-_";
         const string alphabet = lowercase + uppercase + digits + symbols;
-        var configuredSeedPassword = builder.Configuration["Auth:SeedPassword"];
+        var configuredSeedPassword = Environment.GetEnvironmentVariable("MEDIAPAGER_SEED_PASS");
+        if (string.IsNullOrWhiteSpace(configuredSeedPassword))
+            configuredSeedPassword = builder.Configuration["Auth:SeedPassword"];
         string seedPassword;
         if (!string.IsNullOrWhiteSpace(configuredSeedPassword))
         {
