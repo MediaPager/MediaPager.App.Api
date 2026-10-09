@@ -1,0 +1,65 @@
+﻿<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UserSecretsId>d39b6ebc-80ed-4658-a2f4-ce9031fa5d3d</UserSecretsId>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../MediaPager.App.PluginContracts/MediaPager.App.PluginContracts.csproj" />
+    <ProjectReference Include="../MediaPager.App.Core/MediaPager.App.Core.csproj" />
+    <ProjectReference Include="../MediaPager.Plugins.Stream.Local/MediaPager.Plugins.Stream.Local.csproj" />
+    <ProjectReference Include="../MediaPager.Plugins.Search.Local/MediaPager.Plugins.Search.Local.csproj" />
+    <ProjectReference Include="../MediaPager.Plugins.Search.Tmdb/MediaPager.Plugins.Search.Tmdb.csproj" />
+    <ProjectReference Include="../MediaPager.Plugins.Subtitles.OpenSubtitles/MediaPager.Plugins.Subtitles.OpenSubtitles.csproj" />
+    <ProjectReference Include="../MediaPager.Plugins.Subtitles.Subdl/MediaPager.Plugins.Subtitles.Subdl.csproj" />
+    <!-- Default-installed email providers. Gmail/Office365 are official too but intentionally
+         not referenced: they load only once installed into the community plugins directory. -->
+    <ProjectReference Include="../MediaPager.Plugins.Email.Smtp/MediaPager.Plugins.Email.Smtp.csproj" />
+    <ProjectReference Include="../MediaPager.Plugins.Email.MailGun/MediaPager.Plugins.Email.MailGun.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Host code doesn't send mail itself, but MailKit stays referenced so the assembly is
+         always in the app output: community-installed email plugins (Gmail/Office365) resolve
+         it from the host's probing path. -->
+    <PackageReference Include="MailKit" Version="4.14.1" />
+    <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="10.0.0" />
+    <PackageReference Include="Microsoft.AspNetCore.Identity.EntityFrameworkCore" Version="10.0.0" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="10.0.0">
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+      <PrivateAssets>all</PrivateAssets>
+    </PackageReference>
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Sqlite" Version="10.0.0" />
+    <PackageReference Include="Microsoft.Playwright" Version="1.63.0" />
+  </ItemGroup>
+
+<ItemGroup>
+    <!-- Plugin lists are loaded from the output directory at boot (dev: bin, publish: image),
+         so appsettings.json stays a thin Required-by-id file. -->
+    <Content Update="plugins.official.json" CopyToOutputDirectory="PreserveNewest" />
+    <Content Update="plugins.community.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <!-- Official plugins ship through the same install-into-a-directory process as community
+       ones (one folder per plugin, its dll inside); the difference is they are deployed here,
+       on build, into the official directory. Containers override MediaPagerOfficialPluginsDir
+       to a path inside the publish output and point Plugins:Directory at its parent. -->
+  <PropertyGroup>
+    <MediaPagerOfficialPluginsDir Condition="'$(MediaPagerOfficialPluginsDir)' == ''">$([System.Environment]::GetFolderPath(SpecialFolder.UserProfile))/.MediaPager/plugins/official</MediaPagerOfficialPluginsDir>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- Shipped (ProjectReference'd) official plugins: assembly/folder name == project name.
+         Optional officials (Gmail/Office365) install on demand through the deployer. -->
+    <OfficialPluginDeploy Include="MediaPager.Plugins.Stream.Local;MediaPager.Plugins.Search.Local;MediaPager.Plugins.Search.Tmdb;MediaPager.Plugins.Subtitles.OpenSubtitles;MediaPager.Plugins.Subtitles.Subdl;MediaPager.Plugins.Email.Smtp;MediaPager.Plugins.Email.MailGun" />
+  </ItemGroup>
+  <Target Name="DeployOfficialPlugins" AfterTargets="Build">
+    <MakeDir Directories="@(OfficialPluginDeploy->'$(MediaPagerOfficialPluginsDir)/%(Identity)')" />
+    <Copy SourceFiles="@(OfficialPluginDeploy->'$(TargetDir)%(Identity).dll')"
+          DestinationFiles="@(OfficialPluginDeploy->'$(MediaPagerOfficialPluginsDir)/%(Identity)/%(Identity).dll')"
+          SkipUnchangedFiles="true" />
+  </Target>
+
+</Project>
