@@ -181,9 +181,8 @@ public sealed class SourcesController(
     }
 
     // GET /sources/{key}/resolve/{externalId} — resolve a title to a playback session.
-    // The plugin returns the raw upstream URI; the core SSRF-guards it, mints a short-lived
-    // session, and the browser plays through /stream/{streamId}/root (playlists/segments
-    // proxied anonymously, token never exposed to the media element).
+    // The plugin returns the raw upstream URI plus optional content-type metadata; the core
+    // SSRF-guards it, mints a short-lived session, and the browser plays through the proxy.
     [HttpGet("{key}/resolve/{externalId}")]
     public async Task<IActionResult> Resolve(
         string key,
@@ -217,8 +216,16 @@ public sealed class SourcesController(
         if (!await StreamingService.IsSafeStreamUri(result.UpstreamUri, cancellationToken))
             return Problem("The resolved stream URL is not a safe HTTPS URL.", statusCode: StatusCodes.Status502BadGateway);
 
-        var session = sessions.Create(result.UpstreamUri);
-        return Ok(new { streamId = session.Id });
+        if (result.DirectPlayback)
+            return Ok(new
+            {
+                streamUrl = result.UpstreamUri.ToString(),
+                contentType = result.ContentType,
+                directPlayback = true,
+            });
+
+        var session = sessions.Create(result.UpstreamUri, result.ContentType);
+        return Ok(new { streamId = session.Id, contentType = result.ContentType, directPlayback = false });
     }
 
     // GET /sources/search?q=&limit= — fused unified type-ahead across every registered
@@ -248,7 +255,10 @@ public sealed class SourcesController(
                     hit.Year,
                     hit.VoteAverage,
                     hit.Overview,
-                    hit.ArtworkUrl)).ToList();
+                    hit.ArtworkUrl)
+                {
+                    Metadata = hit.Metadata,
+                }).ToList();
             }
             catch
             {
@@ -274,7 +284,10 @@ public sealed class SourcesController(
         int? Year,
         double? VoteAverage,
         string? Overview,
-        string? ArtworkUrl);
+        string? ArtworkUrl)
+    {
+        public IReadOnlyList<ContentMetadata>? Metadata { get; init; }
+    }
 
     // GET /plugins/{key}/settings — stored values for the data-driven settings UI.
     // Secret fields are never read back: the response carries a boolean per secret field so

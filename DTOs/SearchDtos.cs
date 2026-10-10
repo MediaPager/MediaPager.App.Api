@@ -14,4 +14,7 @@ public record SearchHit(
     string SourceKey,
     string ExternalId,
     int? CatalogItemId = null,
-    int? CatalogId = null);
+    int? CatalogId = null)
+{
+    public IReadOnlyList<ContentMetadata>? Metadata { get; init; }
+}

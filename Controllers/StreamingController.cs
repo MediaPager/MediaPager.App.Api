@@ -9,7 +9,7 @@ public sealed class StreamingController(
     IHttpClientFactory httpClientFactory,
     StreamSessionState sessions) : ControllerBase
 {
-    // GET /stream/{streamId}/{resourceId} — proxy HLS playlists and media through this API.
+    // GET /stream/{streamId}/{resourceId} — proxy a stream session through this API.
     [HttpGet("stream/{streamId}/{resourceId}")]
     [AllowAnonymous]
     public async Task<IActionResult> ProxyStream(string streamId, string resourceId, CancellationToken cancellationToken)
@@ -83,7 +83,9 @@ public sealed class StreamingController(
             // The upstream often mislabels media segments as text/html, which makes the browser's
             // HLS engine reject them. Serve a correct media type by path, falling back to binary.
             var segmentPath = currentUri.AbsolutePath.ToLowerInvariant();
-            Response.ContentType = segmentPath switch
+            Response.ContentType = resourceId == "root" && !string.IsNullOrWhiteSpace(session.RootContentType)
+                ? session.RootContentType
+                : segmentPath switch
             {
                 _ when segmentPath.EndsWith(".ts") => "video/mp2t",
                 _ when segmentPath.EndsWith(".m4s") || segmentPath.EndsWith(".mp4") || segmentPath.EndsWith(".cmfv") => "video/mp4",

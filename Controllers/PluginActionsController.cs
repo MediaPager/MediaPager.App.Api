@@ -58,7 +58,10 @@ public sealed class PluginActionsController(PluginRegistry registry) : Controlle
             request.ImageUrl,
             request.BackdropUrl,
             request.Overview,
-            request.Year);
+            request.Year)
+        {
+            Metadata = request.Metadata,
+        };
         try
         {
             await actions.InvokeActionAsync(context, cancellationToken);
@@ -92,4 +95,7 @@ public sealed record PluginActionRequest(
     string? ImageUrl = null,
     string? BackdropUrl = null,
     string? Overview = null,
-    int? Year = null);
+    int? Year = null)
+{
+    public IReadOnlyList<ContentMetadata>? Metadata { get; init; }
+}

@@ -66,7 +66,10 @@ public sealed class SearchController(PluginRegistry registry) : ControllerBase
                 SourceKey: hit.SourceKey,
                 ExternalId: hit.ExternalId,
                 CatalogItemId: hit.CatalogItemId,
-                CatalogId: hit.CatalogId))
+                CatalogId: hit.CatalogId)
+            {
+                Metadata = hit.Metadata,
+            })
             .ToList();
 
         return Ok(hits);
