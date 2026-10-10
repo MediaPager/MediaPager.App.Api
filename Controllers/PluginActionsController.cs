@@ -19,7 +19,15 @@ public sealed class PluginActionsController(PluginRegistry registry) : Controlle
             return NotFound(Problem($"No action provider '{key}' is loaded.", statusCode: StatusCodes.Status404NotFound));
 
         request ??= new PluginActionRequest();
-        var declaredActions = await actions.GetActionsAsync(cancellationToken);
+        IReadOnlyList<PluginActionDescriptor> declaredActions;
+        try
+        {
+            declaredActions = await actions.GetActionsAsync(cancellationToken);
+        }
+        catch (PluginOperationException exception)
+        {
+            return PluginErrorResponses.ToProblem(exception.Error);
+        }
         var matchingActions = declaredActions.Where(candidate =>
             string.Equals(candidate.ActionId, actionId, StringComparison.OrdinalIgnoreCase));
         var descriptor = request.Kind is { } requestedKind
@@ -55,6 +63,10 @@ public sealed class PluginActionsController(PluginRegistry registry) : Controlle
         {
             await actions.InvokeActionAsync(context, cancellationToken);
             return Ok(new { message = "Action dispatched." });
+        }
+        catch (PluginOperationException exception)
+        {
+            return PluginErrorResponses.ToProblem(exception.Error);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {

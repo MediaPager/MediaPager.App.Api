@@ -145,6 +145,10 @@ public sealed class SourcesController(
             var result = await provider.BrowseAsync(key, query, page, cancellationToken);
             return Ok(result);
         }
+        catch (PluginOperationException exception)
+        {
+            return PluginErrorResponses.ToProblem(exception.Error);
+        }
         catch (Exception exception)
         {
             return Problem($"Source '{key}' browse failed: {exception.Message}", statusCode: StatusCodes.Status502BadGateway);
@@ -165,6 +169,10 @@ public sealed class SourcesController(
             if (details is null)
                 return NotFound(Problem($"Source '{key}' has no title '{externalId}'.", statusCode: StatusCodes.Status404NotFound));
             return Ok(details);
+        }
+        catch (PluginOperationException exception)
+        {
+            return PluginErrorResponses.ToProblem(exception.Error);
         }
         catch (Exception exception)
         {
@@ -193,6 +201,10 @@ public sealed class SourcesController(
         {
             var request = new StreamResolveRequest(key, externalId, source.Kind, season, episode);
             result = await provider.ResolveAsync(request, cancellationToken);
+        }
+        catch (PluginOperationException exception)
+        {
+            return PluginErrorResponses.ToProblem(exception.Error);
         }
         catch (Exception exception)
         {
