@@ -235,7 +235,7 @@ public sealed class PluginJobsService(
 
         var folder = Path.Combine(directory, assembly);
         var manifest = ReadInstalledManifest(folder, assembly);
-        if (string.Equals(manifest?.Id ?? key, "mediapager.stream.example", StringComparison.OrdinalIgnoreCase) &&
+        if (manifest?.HostCapabilities?.Contains(PluginHostCapabilityNames.BrowserAutomation) == true &&
             !browserInstaller.IsChromiumInstalled())
             return new PluginEnableOutcome(StartByKey(key), null);
         if ((manifest?.Requires ?? []).Any(id => registry.GetPlugin(id) is null))
@@ -245,7 +245,7 @@ public sealed class PluginJobsService(
         if (File.Exists(marker))
             File.Delete(marker);
 
-        await EnsurePluginToolsAsync(manifest?.Id ?? key, cancellationToken);
+        await EnsurePluginToolsAsync(manifest, cancellationToken);
 
         var reservedIds = new HashSet<string>(
             PluginCatalog.ReadOfficial(configuration).Select(entry => entry.Id),
@@ -270,9 +270,9 @@ public sealed class PluginJobsService(
         return new PluginEnableOutcome(null, $"{loadedPlugins[0].Descriptor.Name} is active.");
     }
 
-    private async Task EnsurePluginToolsAsync(string? pluginId, CancellationToken cancellationToken)
+    private async Task EnsurePluginToolsAsync(PluginManifest? manifest, CancellationToken cancellationToken)
     {
-        if (string.Equals(pluginId, "mediapager.stream.example", StringComparison.OrdinalIgnoreCase))
+        if (manifest?.HostCapabilities?.Contains(PluginHostCapabilityNames.BrowserAutomation) == true)
         {
             await toolBootstrapState.WaitAsync(cancellationToken);
             await browserInstaller.EnsureChromiumInstalledAsync(cancellationToken);
@@ -352,10 +352,10 @@ public sealed class PluginJobsService(
             if (manifest is not null)
                 await EnsureRequiredPluginsAsync(manifest, job, new HashSet<string>([manifest.Id], StringComparer.OrdinalIgnoreCase));
 
-            if (string.Equals(manifest?.Id ?? plan.Id, "mediapager.stream.example", StringComparison.OrdinalIgnoreCase))
+            if (manifest?.HostCapabilities?.Contains(PluginHostCapabilityNames.BrowserAutomation) == true)
             {
                 job.Update(88, "tools", "Provisioning the pinned browser runtime into the managed tool cache…");
-                await EnsurePluginToolsAsync(manifest?.Id ?? plan.Id, CancellationToken.None);
+                await EnsurePluginToolsAsync(manifest, CancellationToken.None);
             }
             job.Update(92, "loading", "Verifying the plugin (load + id checks)…");
             var reservedIds = new HashSet<string>(

@@ -47,9 +47,10 @@ internal sealed record PluginWorkerActivityClearArguments(string JobId);
 internal sealed record PluginWorkerJobHandle(string Id);
 internal sealed record PluginWorkerTransferArguments(MediaTransferRequest Request);
 internal sealed record PluginWorkerDestinationArguments(int CatalogId, string CatalogTypeSlug);
+internal sealed record PluginWorkerActionPresenceArguments(string PluginId, MediaKind Kind);
+internal sealed record PluginWorkerMediaKindArguments(MediaKind Kind);
 internal sealed record PluginWorkerSettingsArguments(string PluginKey, string Name, string? Value = null);
 internal sealed record PluginWorkerMediaStreamArguments(PluginActionContext Context);
-internal sealed record PluginWorkerActionPresenceArguments(MediaKind Kind);
 internal sealed record PluginWorkerStreamResolution(Uri? UpstreamUri, MediaKind? Kind);
 
 internal static class PluginWorkerJson

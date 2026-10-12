@@ -42,7 +42,7 @@ public sealed class PlaywrightBrowserInstaller(ManagedToolDirectory toolDirector
                 return;
             }
             Directory.CreateDirectory(browserDirectory);
-            progress?.Report(new MediaToolProgress(0.05, "Downloading the pinned Chromium runtime…"));
+            progress?.Report(new MediaToolProgress(0.05, "Installing the pinned Chromium runtime…"));
             logger.LogInformation("Installing the Playwright {Version} Chromium revision into {BrowserDirectory}.",
                 Version, browserDirectory);
 

@@ -11,4 +11,5 @@ public record CastMember(string Name, string? Character, string? ProfileUrl);
 
 public record MovieDetails(long Id, string? Year, string Title, double VoteAverage, string Overview,
     string? PosterUrl, string? BackdropUrl, string? ReleaseDate, int? RuntimeMinutes,
-    List<string> Genres, string? Director, List<CastMember> Cast, List<MovieSummary> Related);
+    List<string> Genres, string? Director, List<CastMember> Cast, List<MovieSummary> Related,
+    string? ImdbId = null);

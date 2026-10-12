@@ -28,13 +28,23 @@ public sealed class FfmpegMediaToolBroker(
                NormalizeDirectory(catalog.Path) is not null;
     }
 
+    public Task<bool> HasOnlineStreamProviderAsync(MediaKind kind, CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var available = registry.ResolveAll<IStreamProviderPlugin>()
+            .Where(provider => provider.Mode == StreamProviderMode.Online)
+            .Any(provider => provider.Sources.Any(source => source.Kind == kind));
+        return Task.FromResult(available);
+    }
+
     public async Task<bool> HasOtherStreamItemActionAsync(
+        string pluginId,
         MediaKind kind,
         CancellationToken cancellationToken = default)
     {
         foreach (var plugin in registry.Plugins)
         {
-            if (string.Equals(plugin.Descriptor.Id, "mediapager.actions.example", StringComparison.OrdinalIgnoreCase) ||
+            if (string.Equals(plugin.Descriptor.Id, pluginId, StringComparison.OrdinalIgnoreCase) ||
                 plugin is not IPluginActions actions)
                 continue;
             var declared = await actions.GetActionsAsync(cancellationToken);
@@ -143,7 +153,16 @@ public sealed class FfmpegMediaToolBroker(
                 Year: request.Year,
                 CatalogId: catalog.Id)
             {
-                MusicMetadata = request.MusicMetadata
+                MusicMetadata = request.MusicMetadata,
+                SeriesTitle = request.SeriesTitle,
+                SeriesExternalId = request.SeriesExternalId,
+                SeriesImageUrl = request.SeriesImageUrl,
+                SeriesBackdropUrl = request.SeriesBackdropUrl,
+                SeriesOverview = request.SeriesOverview,
+                SeriesYear = request.SeriesYear,
+                SeasonTitle = request.SeasonTitle,
+                SeasonNumber = request.SeasonNumber,
+                EpisodeNumber = request.EpisodeNumber,
             }, cancellationToken);
             if (libraryItem.ItemId is not int itemId)
                 throw new InvalidOperationException("The host could not create the destination library item.");
@@ -376,7 +395,7 @@ public sealed class FfmpegMediaToolBroker(
     {
         foreach (var invalid in Path.GetInvalidFileNameChars()) value = value.Replace(invalid, '_');
         var sanitized = value.Trim().TrimEnd('.', ' ');
-        return string.IsNullOrWhiteSpace(sanitized) ? "item" : sanitized;
+        return string.IsNullOrWhiteSpace(sanitized) ? "media" : sanitized;
     }
 
     private static string SafeJobId(string? jobId) =>

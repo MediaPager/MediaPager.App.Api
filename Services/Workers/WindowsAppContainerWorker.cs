@@ -33,7 +33,8 @@ internal static class WindowsAppContainerWorker
         string pluginAssembly,
         string pluginDirectory,
         string workerHome,
-        string pluginId)
+        string pluginId,
+        IReadOnlySet<string> hostCapabilities)
     {
         var profileName = $"MediaPager.Worker.{Guid.NewGuid():N}";
         IntPtr appContainerSid = IntPtr.Zero;
@@ -50,6 +51,7 @@ internal static class WindowsAppContainerWorker
                 staged.PluginAssembly,
                 pluginId,
                 workerHome,
+                string.Join(',', hostCapabilities.OrderBy(capability => capability, StringComparer.OrdinalIgnoreCase)),
                 string.Equals(executablePath, staged.ApiAppHost, StringComparison.OrdinalIgnoreCase));
             var commandLine = BuildCommandLine(executablePath, arguments);
             return StartProcess(executablePath, commandLine, workerHome, appContainerSid, profileName);
@@ -221,6 +223,7 @@ internal static class WindowsAppContainerWorker
         string stagedPluginAssembly,
         string pluginId,
         string workerHome,
+        string hostCapabilities,
         bool useApiAppHost)
     {
         var arguments = new List<string>();
@@ -230,6 +233,7 @@ internal static class WindowsAppContainerWorker
         arguments.Add(stagedPluginAssembly);
         arguments.Add(pluginId);
         arguments.Add(workerHome);
+        arguments.Add(hostCapabilities);
         return arguments;
     }
 
