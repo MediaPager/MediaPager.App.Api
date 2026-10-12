@@ -9,7 +9,7 @@ namespace MediaPager.App.Api.Controllers;
 [Authorize(Policy = "CanEditSettings")]
 public sealed class SettingsController(
     IRuntimeSettings settings,
-    IPluginSettingsStore pluginSettings,
+    IPluginSettingsRepository pluginSettings,
     AuthDbContext database,
     PluginRegistry registry,
     IConfiguration configuration) : ControllerBase

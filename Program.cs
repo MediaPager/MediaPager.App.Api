@@ -9,6 +9,31 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
 using MediaPager.App.Api.Controllers;
 using MediaPager.App.Core.Services;
+using NoBugsGiven.Quasar.Interop;
+
+if (ApiRestartBootstrapper.IsBootstrapMode(args))
+{
+    await ApiRestartBootstrapper.RunAsync(args);
+    return;
+}
+
+if (PluginWorkerCommand.IsWorkerMode(args))
+{
+    Environment.ExitCode = await PluginWorkerCommand.RunAsync(args);
+    return;
+}
+
+if (ManagedToolsBootstrapCommand.IsBootstrapMode(args))
+{
+    Environment.ExitCode = await ManagedToolsBootstrapCommand.RunAsync(args);
+    return;
+}
+
+if (ManagedPluginBuildSdkCommand.IsBootstrapMode(args))
+{
+    Environment.ExitCode = await ManagedPluginBuildSdkCommand.RunAsync(args);
+    return;
+}
 
 var builder = WebApplication.CreateBuilder(args);
 // Plugin metadata lists, extracted so appsettings.json stays a thin Required-by-id file.
@@ -215,14 +240,37 @@ builder.Services.AddSingleton<LocalFileSessionState>();
 builder.Services.AddSingleton<PluginRegistry>();
 builder.Services.AddSingleton<IPluginHost>(services => services.GetRequiredService<PluginRegistry>());
 builder.Services.AddSingleton<PluginActivityStore>();
-builder.Services.AddSingleton<IPluginSettingsStore, PluginSettingsService>();
+builder.Services.AddSingleton<IPluginSettingsRepository, PluginSettingsService>();
+builder.Services.AddSingleton<ManagedToolDirectory>();
+builder.Services.AddSingleton<ManagedToolsBootstrapState>();
+builder.Services.AddHttpClient<FfmpegToolInstaller>(client => client.Timeout = Timeout.InfiniteTimeSpan);
+builder.Services.AddHttpClient<ManagedPluginBuildSdkProvider>(client => client.Timeout = Timeout.InfiniteTimeSpan);
+builder.Services.AddSingleton<IPluginBuildSdkProvider>(services =>
+    services.GetRequiredService<ManagedPluginBuildSdkProvider>());
+builder.Services.AddSingleton<PlaywrightBrowserInstaller>();
+builder.Services.AddSingleton<ManagedToolsProvisioner>();
+builder.Services.AddHostedService<ManagedToolsBootstrapService>();
+builder.Services.AddSingleton<IBrowserAutomationBroker, PlaywrightBrowserAutomationBroker>();
+builder.Services.AddSingleton<IPluginWorkerFactory, PluginWorkerFactory>();
 builder.Services.AddSingleton<PluginDeployer>();
 builder.Services.AddSingleton<PluginInstaller>();
 builder.Services.AddSingleton<PluginJobsService>();
+builder.Services.AddSingleton<ApiRestartCoordinator>(services => new ApiRestartCoordinator(
+    args,
+    PluginDirectories.Community(builder.Configuration),
+    string.Equals(Environment.GetEnvironmentVariable("MEDIAPAGER_TOOLS_BOOTSTRAP_EXTERNAL"), "true", StringComparison.OrdinalIgnoreCase) ||
+    string.Equals(Environment.GetEnvironmentVariable("DOTNET_RUNNING_IN_CONTAINER"), "true", StringComparison.OrdinalIgnoreCase),
+    builder.Configuration.GetValue<bool>("Desktop:Mode"),
+    services.GetRequiredService<IHostApplicationLifetime>(),
+    services.GetRequiredService<ILogger<ApiRestartCoordinator>>()));
 builder.Services.AddSingleton<ILibraryQuery, LibraryQuery>();
 builder.Services.AddSingleton<ILibraryStore, LibraryStore>();
+builder.Services.AddSingleton<IMediaToolBroker, FfmpegMediaToolBroker>();
 builder.Services.AddMemoryCache();
 builder.Services.AddHttpClient<GitHubPluginDiscovery>(client => client.Timeout = TimeSpan.FromSeconds(30));
+builder.Services.AddSingleton<IInteropCapabilityPolicy, MediaPagerInteropCapabilityPolicy>();
+builder.Services.AddSingleton<IInteropCapability, PluginCatalogInteropCapability>();
+builder.Services.AddQuasarInterop();
 builder.Services.AddControllers()
     .AddJsonOptions(options =>
         options.JsonSerializerOptions.Converters.Add(new System.Text.Json.Serialization.JsonStringEnumConverter()));
@@ -237,35 +285,6 @@ builder.Services.AddCors(options =>
 
 var app = builder.Build();
 
-// Plugins install into two directories (the build-time deploy target and the on-demand
-// deployer share one layout): official — shipped officials, deployed there on build,
-// optional officials installed on demand — and community — recognized community plugins,
-// installed on demand. appsettings keeps only which ids are Required; the metadata lists
-// live in plugins.official.json / plugins.community.json.
-var officialDirectory = PluginDirectories.Official(builder.Configuration);
-var communityDirectory = PluginDirectories.Community(builder.Configuration);
-Directory.CreateDirectory(officialDirectory);
-Directory.CreateDirectory(communityDirectory);
-
-// Structural official tagging: reserve every official id (list, installed or not) plus
-// the ids actually loaded, so a community plugin can never shadow an official one —
-// even one that isn't part of this image's default set. Only ids named in
-// Plugins:Required:Official load at boot: the directory holds every shipped official,
-// Required decides which are active (and therefore visible in nav/settings/pickers).
-var officialCatalog = PluginCatalog.ReadOfficial(builder.Configuration);
-var requiredPluginSets = PluginCatalog.ReadRequired(builder.Configuration);
-var reservedPluginIds = new HashSet<string>(
-    officialCatalog.Select(entry => entry.Id), StringComparer.OrdinalIgnoreCase);
-var officialPlugins = PluginLoader.LoadDirectory(
-    app.Services, officialDirectory, official: true, requiredIds: requiredPluginSets.Official);
-foreach (var plugin in officialPlugins)
-    reservedPluginIds.Add(plugin.Descriptor.Id);
-var communityPlugins = PluginLoader.LoadDirectory(
-    app.Services, communityDirectory, official: false, reservedPluginIds);
-app.Services.GetRequiredService<PluginRegistry>().Reset(
-    officialPlugins.Concat(communityPlugins),
-    communityPlugins.Select(plugin => plugin.Descriptor.Id));
-
 app.UseCors();
 app.UseDefaultFiles();
 app.UseStaticFiles();
@@ -273,6 +292,7 @@ app.UseAuthentication();
 app.UseAuthorization();
 
 app.MapControllers();
+app.MapQuasarInterop();
 app.MapFallbackToFile("index.html").AllowAnonymous();
 
 await using (var scope = app.Services.CreateAsyncScope())
@@ -364,5 +384,48 @@ await using (var scope = app.Services.CreateAsyncScope())
             app.Logger.LogWarning("Created initial super-admin {Email} using the configured Auth:SeedPassword.", seedEmail);
     }
 }
+
+// Load plugins after migrations and seeds: plugin constructors and action descriptions may
+// read their settings from the database as soon as the worker is started.
+// Plugins install into two directories (the build-time deploy target and the on-demand
+// deployer share one layout): official — shipped officials, deployed there on build,
+// optional officials installed on demand — and community — recognized community plugins,
+// installed on demand. appsettings keeps only which ids are Required; the metadata lists
+// live in plugins.official.json / plugins.community.json.
+var officialDirectory = PluginDirectories.Official(builder.Configuration);
+var communityDirectory = PluginDirectories.Community(builder.Configuration);
+Directory.CreateDirectory(officialDirectory);
+Directory.CreateDirectory(communityDirectory);
+ApiRestartBootstrapper.CleanupPendingUninstalls(
+    communityDirectory,
+    message => app.Logger.LogWarning("{PendingPluginRemoval}", message));
+
+// Structural official tagging: reserve every official id (list, installed or not) plus
+// the ids actually loaded, so a community plugin can never shadow an official one —
+// even one that isn't part of this image's default set. Only ids named in
+// Plugins:Required:Official load at boot: the directory holds every shipped official,
+// Required decides which are active (and therefore visible in nav/settings/pickers).
+var officialCatalog = PluginCatalog.ReadOfficial(builder.Configuration);
+var requiredPluginSets = PluginCatalog.ReadRequired(builder.Configuration);
+var communityCatalog = PluginCatalog.ReadCommunity(builder.Configuration);
+var officialPluginIdsByAssembly = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+foreach (var entry in officialCatalog)
+    officialPluginIdsByAssembly[entry.Assembly ?? PluginInstaller.DeriveAssemblyName(entry.Repo)] = entry.Id;
+var communityPluginIdsByAssembly = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+foreach (var entry in communityCatalog)
+    communityPluginIdsByAssembly[entry.Assembly ?? PluginInstaller.DeriveAssemblyName(entry.Repo)] = entry.Id;
+var reservedPluginIds = new HashSet<string>(
+    officialCatalog.Select(entry => entry.Id), StringComparer.OrdinalIgnoreCase);
+var officialPlugins = PluginLoader.LoadDirectory(
+    app.Services, officialDirectory, official: true, requiredIds: requiredPluginSets.Official,
+    pluginIdsByAssembly: officialPluginIdsByAssembly);
+foreach (var plugin in officialPlugins)
+    reservedPluginIds.Add(plugin.Descriptor.Id);
+var communityPlugins = PluginLoader.LoadDirectory(
+    app.Services, communityDirectory, official: false, reservedPluginIds,
+    pluginIdsByAssembly: communityPluginIdsByAssembly);
+app.Services.GetRequiredService<PluginRegistry>().Reset(
+    officialPlugins.Concat(communityPlugins),
+    communityPlugins.Select(plugin => plugin.Descriptor.Id));
 
 app.Run();

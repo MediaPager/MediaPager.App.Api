@@ -7,7 +7,7 @@ namespace MediaPager.App.Api.Controllers;
 [Route("subtitles")]
 public sealed class SubtitlesController(
     IRuntimeSettings runtimeSettings,
-    IPluginSettingsStore pluginSettings,
+    IPluginSettingsRepository pluginSettings,
     PluginRegistry registry) : ControllerBase
 {
     // GET /subtitles?tmdb=1377237&lang=en (or ?imdb=tt31349844 or ?query=movie%20title).

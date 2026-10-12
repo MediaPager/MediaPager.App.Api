@@ -154,6 +154,12 @@ namespace MediaPager.App.Api.Migrations.PostgreSql
                     b.Property<DateTimeOffset>("CreatedAt")
                         .HasColumnType("timestamp with time zone");
 
+                    b.Property<int?>("DiscCount")
+                        .HasColumnType("integer");
+
+                    b.Property<int?>("DiscNumber")
+                        .HasColumnType("integer");
+
                     b.Property<long?>("DurationSeconds")
                         .HasColumnType("bigint");
 
@@ -166,6 +172,15 @@ namespace MediaPager.App.Api.Migrations.PostgreSql
                     b.Property<string>("ImageUrl")
                         .HasColumnType("text");
 
+                    b.Property<string>("ImdbId")
+                        .HasColumnType("text");
+
+                    b.Property<string>("Isbn")
+                        .HasColumnType("text");
+
+                    b.Property<string>("Isrc")
+                        .HasColumnType("text");
+
                     b.Property<string>("Kind")
                         .IsRequired()
                         .HasColumnType("text");
@@ -175,6 +190,9 @@ namespace MediaPager.App.Api.Migrations.PostgreSql
 
                     b.Property<DateTimeOffset?>("ModifiedAt")
                         .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("MusicBrainzId")
+                        .HasColumnType("text");
 
                     b.Property<DateTime?>("OriginalAvailableAt")
                         .HasColumnType("timestamp with time zone");
@@ -210,6 +228,12 @@ namespace MediaPager.App.Api.Migrations.PostgreSql
                         .IsRequired()
                         .HasColumnType("text");
 
+                    b.Property<int?>("TrackCount")
+                        .HasColumnType("integer");
+
+                    b.Property<int?>("TrackNumber")
+                        .HasColumnType("integer");
+
                     b.Property<int?>("Year")
                         .HasColumnType("integer");
 
@@ -232,7 +256,40 @@ namespace MediaPager.App.Api.Migrations.PostgreSql
 
                     b.HasIndex("CatalogId", "MediaTypeId");
 
+                    b.HasIndex("CatalogId", "Kind", "MusicBrainzId");
+
                     b.ToTable("CatalogItems");
+                });
+
+            modelBuilder.Entity("MediaPager.App.Core.Models.CatalogItemMusicArtistCredit", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
+
+                    b.Property<int>("ArtistCatalogItemId")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("CatalogItemId")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("Position")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("Role")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ArtistCatalogItemId", "Role");
+
+                    b.HasIndex("CatalogItemId", "Role", "Position")
+                        .IsUnique();
+
+                    b.ToTable("CatalogItemMusicArtistCredits");
                 });
 
             modelBuilder.Entity("MediaPager.App.Core.Models.CatalogItemRating", b =>
@@ -619,6 +676,25 @@ namespace MediaPager.App.Api.Migrations.PostgreSql
                     b.Navigation("Parent");
                 });
 
+            modelBuilder.Entity("MediaPager.App.Core.Models.CatalogItemMusicArtistCredit", b =>
+                {
+                    b.HasOne("MediaPager.App.Core.Models.CatalogItem", "ArtistCatalogItem")
+                        .WithMany()
+                        .HasForeignKey("ArtistCatalogItemId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.HasOne("MediaPager.App.Core.Models.CatalogItem", "CatalogItem")
+                        .WithMany("MusicArtistCredits")
+                        .HasForeignKey("CatalogItemId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("ArtistCatalogItem");
+
+                    b.Navigation("CatalogItem");
+                });
+
             modelBuilder.Entity("MediaPager.App.Core.Models.CatalogItemRating", b =>
                 {
                     b.HasOne("MediaPager.App.Core.Models.CatalogItem", "CatalogItem")
@@ -732,6 +808,8 @@ namespace MediaPager.App.Api.Migrations.PostgreSql
 
             modelBuilder.Entity("MediaPager.App.Core.Models.CatalogItem", b =>
                 {
+                    b.Navigation("MusicArtistCredits");
+
                     b.Navigation("Ratings");
 
                     b.Navigation("Tags");

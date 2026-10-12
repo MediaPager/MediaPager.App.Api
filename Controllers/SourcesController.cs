@@ -14,12 +14,14 @@ namespace MediaPager.App.Api.Controllers;
 [Route("sources")]
 public sealed class SourcesController(
     PluginRegistry registry,
-    IPluginSettingsStore pluginSettings,
+    IPluginSettingsRepository pluginSettings,
     StreamSessionState sessions,
     IConfiguration configuration,
     PluginInstaller installer,
     PluginJobsService pluginJobs,
-    GitHubPluginDiscovery pluginDiscovery) : ControllerBase
+    GitHubPluginDiscovery pluginDiscovery,
+    ApiRestartCoordinator apiRestartCoordinator,
+    ILogger<SourcesController> logger) : ControllerBase
 {
     // The plugin-settings namespace key is the descriptor id's last segment
     // ("mediapager.search.tmdb" → "tmdb") — the same convention PluginSettingsService uses.
@@ -189,7 +191,8 @@ public sealed class SourcesController(
         string externalId,
         [FromQuery] int? season,
         [FromQuery] int? episode,
-        CancellationToken cancellationToken)
+        [FromQuery] bool forceProxy = false,
+        CancellationToken cancellationToken = default)
     {
         var (provider, source) = FindStreamSource(key);
         if (provider is null || source is null)
@@ -216,7 +219,7 @@ public sealed class SourcesController(
         if (!await StreamingService.IsSafeStreamUri(result.UpstreamUri, cancellationToken))
             return Problem("The resolved stream URL is not a safe HTTPS URL.", statusCode: StatusCodes.Status502BadGateway);
 
-        if (result.DirectPlayback)
+        if (result.DirectPlayback && !forceProxy)
             return Ok(new
             {
                 streamUrl = result.UpstreamUri.ToString(),
@@ -613,11 +616,11 @@ public sealed class SourcesController(
     // the SPA polls, same as POST /plugins/jobs {key}.
     [HttpPost("/plugins/{key}/enable")]
     [Authorize(Policy = "SuperAdmin")]
-    public IActionResult EnablePlugin(string key)
+    public async Task<IActionResult> EnablePlugin(string key, CancellationToken cancellationToken)
     {
         try
         {
-            var outcome = pluginJobs.Enable(key);
+            var outcome = await pluginJobs.EnableAsync(key, cancellationToken);
             return outcome.JobId is not null
                 ? Accepted(new { jobId = outcome.JobId })
                 : Ok(new { message = outcome.Message });
@@ -679,9 +682,8 @@ public sealed class SourcesController(
         }
     }
 
-    // DELETE /plugins/{key} — uninstall a community plugin: unload it from the registry and
-    // drop a `.disabled` marker into its install folder so it stays off on the next boot.
-    // Official plugins are locked and cannot be uninstalled.
+    // DELETE /plugins/{key} — remove a community plugin and restart the API so assemblies
+    // loaded in the default context are released. Official plugins are locked.
     [HttpDelete("/plugins/{key}")]
     [Authorize(Policy = "SuperAdmin")]
     public IActionResult UninstallPlugin(string key, [FromQuery] bool removeDependencies = false)
@@ -708,10 +710,21 @@ public sealed class SourcesController(
         var dependenciesToRemove = removeDependencies
             ? registry.GetUnusedDependencies(plugin.Descriptor.Id)
             : [];
+        var uninstallTargets = new[] { plugin }.Concat(dependenciesToRemove).ToList();
+        var installDirectories = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var target in uninstallTargets)
+        {
+            var installDirectory = CommunityPluginDirectory(target);
+            if (installDirectory is null)
+                return Problem($"Could not locate the install directory for '{target.Descriptor.Name}'.",
+                    statusCode: StatusCodes.Status500InternalServerError);
+            installDirectories[target.Descriptor.Id] = installDirectory;
+        }
+
         if (!registry.Remove(plugin.Descriptor.Id))
             return Conflict(Problem($"'{plugin.Descriptor.Name}' is still required by another loaded plugin.",
                 statusCode: StatusCodes.Status409Conflict));
-        MarkDisabled(plugin);
+        RemoveCommunityPluginDirectory(plugin, installDirectories[plugin.Descriptor.Id]);
 
         var removedDependencies = new List<string>();
         foreach (var dependency in dependenciesToRemove)
@@ -719,33 +732,47 @@ public sealed class SourcesController(
             if (registry.GetDependents(dependency.Descriptor.Id).Count > 0 ||
                 !registry.Remove(dependency.Descriptor.Id))
                 continue;
-            MarkDisabled(dependency);
+            RemoveCommunityPluginDirectory(dependency, installDirectories[dependency.Descriptor.Id]);
             removedDependencies.Add(dependency.Descriptor.Name);
         }
 
         var dependencyNote = removedDependencies.Count > 0
             ? $" Removed unused dependencies: {string.Join(", ", removedDependencies)}."
             : "";
-        return Ok(new
+        apiRestartCoordinator.RestartAfterResponse(Response);
+        return Accepted(new
         {
-            message = $"Uninstalled {plugin.Descriptor.Name}. It will stay off after a restart.{dependencyNote}",
+            message = $"Removed {plugin.Descriptor.Name}; the API is restarting.{dependencyNote}",
+            restarting = true,
             removedDependencies,
         });
     }
 
-    private static void MarkDisabled(IMediaPagerPlugin plugin)
+    private string? CommunityPluginDirectory(IMediaPagerPlugin plugin)
     {
+        var installDirectory = plugin is IPluginUiAssetProvider assets
+            ? Directory.GetParent(Path.GetFullPath(assets.PluginUiDirectory))?.FullName
+            : Path.GetDirectoryName(plugin.GetType().Assembly.Location);
+        if (string.IsNullOrWhiteSpace(installDirectory) || !Directory.Exists(installDirectory)) return null;
+
+        var communityRoot = Path.TrimEndingDirectorySeparator(Path.GetFullPath(PluginDirectories.Community(configuration)));
         try
         {
-            var assemblyDir = Path.GetDirectoryName(plugin.GetType().Assembly.Location);
-            if (!string.IsNullOrWhiteSpace(assemblyDir) && Directory.Exists(assemblyDir))
-                System.IO.File.WriteAllText(Path.Combine(assemblyDir, ".disabled"), $"disabled {DateTimeOffset.UtcNow:O}\n");
+            var relative = Path.GetRelativePath(communityRoot, Path.GetFullPath(installDirectory));
+            if (relative == "." || relative == ".." || relative.StartsWith($"..{Path.DirectorySeparatorChar}", StringComparison.Ordinal))
+                return null;
+            return Path.GetFullPath(installDirectory);
         }
         catch (Exception exception)
         {
-            Console.Error.WriteLine($"[plugins] could not write .disabled marker for {plugin.Descriptor.Id}: {exception.Message}");
+            logger.LogError(exception, "Could not resolve the install directory for community plugin {PluginId}.", plugin.Descriptor.Id);
+            return null;
         }
     }
+
+    private void RemoveCommunityPluginDirectory(IMediaPagerPlugin plugin, string installDirectory) =>
+        ApiRestartBootstrapper.RemoveOrSchedule(installDirectory, exception =>
+            logger.LogWarning(exception, "Could not immediately remove community plugin directory for {PluginId}.", plugin.Descriptor.Id));
 
     // GET /plugins/{key}/ui/{**path} — a plugin's custom UI assets. Plugins that declare a
     // source with CustomUi = true ship a "ui" folder next to their assembly; the SPA embeds
@@ -760,9 +787,15 @@ public sealed class SourcesController(
         if (plugin is null)
             return NotFound();
 
-        var uiRoot = Path.Combine(Path.GetDirectoryName(plugin.GetType().Assembly.Location) ?? "", "ui");
+        var uiRoot = plugin is IPluginUiAssetProvider workerUi
+            ? workerUi.PluginUiDirectory
+            : Path.Combine(Path.GetDirectoryName(plugin.GetType().Assembly.Location) ?? "", "ui");
         if (!Directory.Exists(uiRoot))
+        {
+            logger.LogWarning("Custom UI folder was not found for plugin {PluginId} at {UiDirectory}.",
+                plugin.Descriptor.Id, uiRoot);
             return NotFound();
+        }
 
         var relative = string.IsNullOrWhiteSpace(path) ? "index.html" : path;
         var fullPath = Path.GetFullPath(Path.Combine(uiRoot, relative));
@@ -771,7 +804,11 @@ public sealed class SourcesController(
             !string.Equals(fullPath, Path.GetFullPath(uiRoot), StringComparison.Ordinal))
             return NotFound();
         if (!System.IO.File.Exists(fullPath))
+        {
+            logger.LogWarning("Custom UI asset was not found for plugin {PluginId} at {UiAssetPath}.",
+                plugin.Descriptor.Id, fullPath);
             return NotFound();
+        }
 
         var contentType = Path.GetExtension(fullPath).ToLowerInvariant() switch
         {
@@ -788,6 +825,11 @@ public sealed class SourcesController(
             ".woff2" => "font/woff2",
             _ => "application/octet-stream",
         };
+        Response.Headers["X-Content-Type-Options"] = "nosniff";
+        Response.Headers["Content-Security-Policy"] =
+            "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; " +
+            "img-src 'self' data: blob:; font-src 'self' data:; media-src 'self' blob:; " +
+            "connect-src 'none'; frame-src 'none'; form-action 'none'; object-src 'none'; base-uri 'none'";
         return PhysicalFile(fullPath, contentType);
     }
 
@@ -827,6 +869,9 @@ public sealed class SourcesController(
             enabled = action.Enabled,
             availabilityMessage = action.AvailabilityMessage,
             availabilityPluginId = action.AvailabilityPluginId,
+            confirmationTitle = action.ConfirmationTitle,
+            confirmationMessage = action.ConfirmationMessage,
+            showLabel = action.ShowLabel,
         }).ToArray()
         : [];
 

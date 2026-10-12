@@ -16,7 +16,8 @@ public record TvEpisodeSummary(int EpisodeNumber, string Title, string Overview,
 public record TvShowDetails(long Id, string? Year, string Title, double VoteAverage, string Overview,
     string? PosterUrl, string? BackdropUrl, string? FirstAirDate, string? LastAirDate,
     int? NumberOfSeasons, string? Status, List<string> Genres, string? Creator,
-    List<CastMember> Cast, List<TvShowSummary> Related, List<TvSeasonSummary> Seasons);
+    List<CastMember> Cast, List<TvShowSummary> Related, List<TvSeasonSummary> Seasons,
+    string? ImdbId = null);
 
 public record TvSeasonDetails(string? Name, string? Overview, string? AirDate, int SeasonNumber,
     List<TvEpisodeSummary> Episodes);

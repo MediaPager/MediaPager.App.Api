@@ -19,7 +19,20 @@ public record UpstreamMovie(
     [property: JsonPropertyName("vote_average")] double VoteAverage,
     [property: JsonPropertyName("overview")] string? Overview,
     [property: JsonPropertyName("poster_path")] string? PosterPath,
-    [property: JsonPropertyName("backdrop_path")] string? BackdropPath);
+    [property: JsonPropertyName("backdrop_path")] string? BackdropPath)
+{
+    [JsonPropertyName("genre_ids")]
+    public List<int>? GenreIds { get; init; }
+
+    [JsonPropertyName("vote_count")]
+    public int VoteCount { get; init; }
+
+    [JsonPropertyName("popularity")]
+    public double Popularity { get; init; }
+
+    [JsonPropertyName("original_language")]
+    public string? OriginalLanguage { get; init; }
+}
 
 public record TmdbMovieDetails(
     [property: JsonPropertyName("id")] long Id,
@@ -34,9 +47,14 @@ public record TmdbMovieDetails(
     [property: JsonPropertyName("genres")] List<TmdbGenre>? Genres,
     [property: JsonPropertyName("production_countries")] List<TmdbCountry>? ProductionCountries,
     [property: JsonPropertyName("credits")] TmdbCredits? Credits,
-    [property: JsonPropertyName("similar")] TmdbResponse? Similar);
+    [property: JsonPropertyName("similar")] TmdbResponse? Similar,
+    [property: JsonPropertyName("imdb_id")] string? ImdbId);
 
-public record TmdbGenre([property: JsonPropertyName("name")] string? Name);
+public record TmdbGenre(
+    [property: JsonPropertyName("id")] int Id,
+    [property: JsonPropertyName("name")] string? Name);
+
+public record TmdbGenreList([property: JsonPropertyName("genres")] List<TmdbGenre>? Genres);
 
 public record TmdbCountry([property: JsonPropertyName("name")] string? Name);
 
@@ -90,7 +108,10 @@ public record TmdbTvDetails(
     [property: JsonPropertyName("created_by")] List<TmdbCreator>? CreatedBy,
     [property: JsonPropertyName("credits")] TmdbCredits? Credits,
     [property: JsonPropertyName("similar")] TmdbResponse? Similar,
-    [property: JsonPropertyName("seasons")] List<TmdbSeason>? Seasons);
+    [property: JsonPropertyName("seasons")] List<TmdbSeason>? Seasons,
+    [property: JsonPropertyName("external_ids")] TmdbExternalIds? ExternalIds);
+
+public record TmdbExternalIds([property: JsonPropertyName("imdb_id")] string? ImdbId);
 
 public record TmdbCreator([property: JsonPropertyName("name")] string? Name);
 
