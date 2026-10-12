@@ -27,6 +27,14 @@
           "systemRequired": true
         },
         {
+          "id": "mediapager.metadata.musicbrainz",
+          "name": "MusicBrainz",
+          "category": "metadata",
+          "repo": "https://github.com/MediaPager/MediaPager.Plugins.Metadata.MusicBrainz",
+          "assembly": "MediaPager.Plugins.Metadata.MusicBrainz",
+          "systemRequired": true
+        },
+        {
           "id": "mediapager.subtitles.opensubtitles",
           "name": "OpenSubtitles",
           "category": "subtitles",
