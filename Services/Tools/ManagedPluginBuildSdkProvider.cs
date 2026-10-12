@@ -45,7 +45,7 @@ public sealed class ManagedPluginBuildSdkProvider(
         {
             progress?.Report(new PluginBuildSdkProgress(5,
                 $"Preparing pinned .NET SDK {PluginBuildSdkVersion.Version} for plugin builds…"));
-            var installerScript = await DownloadInstallerAsync(stagingDirectory, cancellationToken);
+            var installerScript = await FetchInstallerScriptAsync(stagingDirectory, cancellationToken);
             var stagedInstallDirectory = Path.Combine(stagingDirectory, "sdk");
             Directory.CreateDirectory(stagedInstallDirectory);
 
@@ -88,7 +88,7 @@ public sealed class ManagedPluginBuildSdkProvider(
         }
     }
 
-    private async Task<string> DownloadInstallerAsync(string stagingDirectory, CancellationToken cancellationToken)
+    private async Task<string> FetchInstallerScriptAsync(string stagingDirectory, CancellationToken cancellationToken)
     {
         var scriptName = OperatingSystem.IsWindows() ? "dotnet-install.ps1" : "dotnet-install.sh";
         var scriptPath = Path.Combine(stagingDirectory, scriptName);
@@ -181,8 +181,8 @@ public sealed class ManagedPluginBuildSdkProvider(
             if (lines.Count == 60) lines.RemoveAt(0);
             lines.Add(line);
             logger.LogDebug(".NET SDK installer: {Line}", line);
-            if (line.Contains("download", StringComparison.OrdinalIgnoreCase))
-                progress?.Report(new PluginBuildSdkProgress(20, "Downloading the pinned .NET SDK…"));
+            if (line.Contains("install", StringComparison.OrdinalIgnoreCase))
+                progress?.Report(new PluginBuildSdkProgress(20, "Installing the pinned .NET SDK…"));
             else if (line.Contains("extract", StringComparison.OrdinalIgnoreCase))
                 progress?.Report(new PluginBuildSdkProgress(80, "Extracting the pinned .NET SDK…"));
         }

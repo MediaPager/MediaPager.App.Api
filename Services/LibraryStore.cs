@@ -8,6 +8,7 @@ namespace MediaPager.App.Api.Services;
 public sealed class LibraryStore(IServiceScopeFactory scopeFactory) : ILibraryStore
 {
     private static readonly ConcurrentDictionary<int, SemaphoreSlim> MusicCatalogLocks = new();
+    private static readonly ConcurrentDictionary<int, SemaphoreSlim> TvCatalogLocks = new();
 
     public async Task<LibraryCatalogInfo?> GetCatalogAsync(int catalogId, CancellationToken cancellationToken = default)
     {
@@ -70,6 +71,22 @@ public sealed class LibraryStore(IServiceScopeFactory scopeFactory) : ILibrarySt
             }
         }
 
+        if (request.Kind == MediaKind.Tv &&
+            !string.IsNullOrWhiteSpace(request.SeriesExternalId) &&
+            request.SeasonNumber is > 0 && request.EpisodeNumber is > 0)
+        {
+            var gate = TvCatalogLocks.GetOrAdd(catalog.Id, _ => new SemaphoreSlim(1, 1));
+            await gate.WaitAsync(cancellationToken);
+            try
+            {
+                return await SaveTvEpisodeAsync(database, catalog, request, cancellationToken);
+            }
+            finally
+            {
+                gate.Release();
+            }
+        }
+
         if (!string.IsNullOrWhiteSpace(request.ExternalId))
         {
             var existing = await database.CatalogItems.AsNoTracking()
@@ -103,6 +120,85 @@ public sealed class LibraryStore(IServiceScopeFactory scopeFactory) : ILibrarySt
         database.CatalogItems.Add(item);
         await database.SaveChangesAsync(cancellationToken);
         return new LibraryItemHandle(item.Id, Created: true);
+    }
+
+    private static async Task<LibraryItemHandle> SaveTvEpisodeAsync(
+        AuthDbContext database,
+        Catalog catalog,
+        LibraryItemWriteRequest request,
+        CancellationToken cancellationToken)
+    {
+        var episodeExternalId = string.IsNullOrWhiteSpace(request.ExternalId) ? null : request.ExternalId.Trim();
+        if (episodeExternalId is not null)
+        {
+            var existingEpisodeId = await database.CatalogItems.AsNoTracking()
+                .Where(item => item.CatalogId == catalog.Id && item.Kind == "episode" && item.ExternalId == episodeExternalId)
+                .Select(item => (int?)item.Id)
+                .FirstOrDefaultAsync(cancellationToken);
+            if (existingEpisodeId is int existingId)
+                return new LibraryItemHandle(existingId, Created: false);
+        }
+
+        var seriesExternalId = request.SeriesExternalId!.Trim();
+        var series = await database.CatalogItems.FirstOrDefaultAsync(item =>
+            item.CatalogId == catalog.Id && item.Kind == "show" && item.ExternalId == seriesExternalId,
+            cancellationToken);
+        if (series is null)
+        {
+            series = new CatalogItem
+            {
+                CatalogId = catalog.Id,
+                MediaTypeId = catalog.CatalogType!.MediaType!.Id,
+                Title = string.IsNullOrWhiteSpace(request.SeriesTitle) ? request.Title : request.SeriesTitle.Trim(),
+                Kind = "show",
+                ExternalId = seriesExternalId,
+                ImageUrl = request.SeriesImageUrl,
+                BackdropUrl = request.SeriesBackdropUrl,
+                Overview = request.SeriesOverview,
+                Year = request.SeriesYear,
+            };
+            database.CatalogItems.Add(series);
+            await database.SaveChangesAsync(cancellationToken);
+        }
+
+        var seasonNumber = request.SeasonNumber!.Value.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        var season = await database.CatalogItems.FirstOrDefaultAsync(item =>
+            item.CatalogId == catalog.Id && item.Kind == "season" && item.ParentId == series.Id &&
+            item.SeasonNumber == seasonNumber,
+            cancellationToken);
+        if (season is null)
+        {
+            season = new CatalogItem
+            {
+                CatalogId = catalog.Id,
+                MediaTypeId = catalog.CatalogType!.MediaType!.Id,
+                ParentId = series.Id,
+                Title = string.IsNullOrWhiteSpace(request.SeasonTitle) ? $"Season {seasonNumber}" : request.SeasonTitle.Trim(),
+                Kind = "season",
+                SeasonNumber = seasonNumber,
+            };
+            database.CatalogItems.Add(season);
+            await database.SaveChangesAsync(cancellationToken);
+        }
+
+        var episode = new CatalogItem
+        {
+            CatalogId = catalog.Id,
+            MediaTypeId = catalog.CatalogType!.MediaType!.Id,
+            ParentId = season.Id,
+            Title = request.Title,
+            Kind = "episode",
+            ExternalId = episodeExternalId,
+            SeasonNumber = seasonNumber,
+            EpisodeNumber = request.EpisodeNumber.GetValueOrDefault().ToString(System.Globalization.CultureInfo.InvariantCulture),
+            ImageUrl = request.ImageUrl,
+            BackdropUrl = request.BackdropUrl ?? request.SeriesBackdropUrl,
+            Overview = request.Overview,
+            Year = request.Year,
+        };
+        database.CatalogItems.Add(episode);
+        await database.SaveChangesAsync(cancellationToken);
+        return new LibraryItemHandle(episode.Id, Created: true);
     }
 
     private static async Task<LibraryItemHandle> SaveMusicTrackAsync(
@@ -313,8 +409,15 @@ public sealed class LibraryStore(IServiceScopeFactory scopeFactory) : ILibrarySt
         var database = scope.ServiceProvider.GetRequiredService<AuthDbContext>();
         var item = await database.CatalogItems.FirstOrDefaultAsync(entry => entry.Id == itemId, cancellationToken);
         if (item is null) return;
+        var previousParentId = item.ParentId;
+        var creditedArtistIds = await database.CatalogItemMusicArtistCredits.AsNoTracking()
+            .Where(credit => credit.CatalogItemId == item.Id)
+            .Select(credit => credit.ArtistCatalogItemId)
+            .ToListAsync(cancellationToken);
         database.CatalogItems.Remove(item);
         await database.SaveChangesAsync(cancellationToken);
+        if (previousParentId is int parentId) creditedArtistIds.Add(parentId);
+        await MusicCatalogHierarchy.PruneEmptyAncestorsAsync(database, creditedArtistIds, cancellationToken);
     }
 
     private static async Task<int?> ResolveCatalogTypeIdAsync(

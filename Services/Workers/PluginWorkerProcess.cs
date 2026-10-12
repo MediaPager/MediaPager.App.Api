@@ -4,6 +4,7 @@ using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
+using MediaPager.App.Core.Plugins;
 using MediaPager.App.Core.Services;
 using MediaPager.App.PluginContracts;
 
@@ -19,6 +20,7 @@ internal sealed class PluginWorkerProcess : IDisposable
     private readonly IPluginActivity _activity;
     private readonly IBrowserAutomationBroker _browser;
     private readonly IMediaToolBroker _mediaTools;
+    private readonly IReadOnlySet<string> _hostCapabilities;
     private readonly Action<string> _cancelHostJob;
     private readonly ILogger _logger;
     private readonly StreamWriter _stdin;
@@ -45,6 +47,7 @@ internal sealed class PluginWorkerProcess : IDisposable
         IPluginActivity activity,
         IBrowserAutomationBroker browser,
         IMediaToolBroker mediaTools,
+        IReadOnlySet<string> hostCapabilities,
         Action<string> cancelHostJob,
         ILogger logger)
     {
@@ -54,6 +57,7 @@ internal sealed class PluginWorkerProcess : IDisposable
         _activity = activity;
         _browser = browser;
         _mediaTools = mediaTools;
+        _hostCapabilities = new HashSet<string>(hostCapabilities, StringComparer.OrdinalIgnoreCase);
         _cancelHostJob = cancelHostJob;
         _logger = logger;
         _workerHome = Path.Combine(Path.GetTempPath(), "mediapager-workers",
@@ -74,7 +78,8 @@ internal sealed class PluginWorkerProcess : IDisposable
                 pluginAssembly,
                 pluginDirectory,
                 _workerHome,
-                pluginId);
+                pluginId,
+                _hostCapabilities);
             _process = launch.Process;
             _stdin = launch.StandardInput;
             _stdout = launch.StandardOutput;
@@ -85,7 +90,7 @@ internal sealed class PluginWorkerProcess : IDisposable
         }
         else
         {
-            var startInfo = CreateStartInfo(pluginAssembly, pluginId, _workerHome);
+            var startInfo = CreateStartInfo(pluginAssembly, pluginId, _workerHome, _hostCapabilities);
             _process = Process.Start(startInfo)
                 ?? throw new InvalidOperationException($"Could not start worker process for '{pluginId}'.");
             _stdin = _process.StandardInput;
@@ -251,8 +256,8 @@ internal sealed class PluginWorkerProcess : IDisposable
             };
         }
 
-        if (message.Capability == "browser.automation" && string.Equals(_pluginId,
-                "mediapager.stream.vidsrc", StringComparison.OrdinalIgnoreCase))
+        if (message.Capability == "browser.automation" &&
+            _hostCapabilities.Contains(PluginHostCapabilityNames.BrowserAutomation))
         {
             return message.Operation switch
             {
@@ -267,8 +272,8 @@ internal sealed class PluginWorkerProcess : IDisposable
         if (message.Capability == "activity")
             return await DispatchActivityCallAsync(message, cancellationToken);
 
-        if (message.Capability == "media.tools" && string.Equals(_pluginId,
-                "mediapager.actions.downloads", StringComparison.OrdinalIgnoreCase))
+        if (message.Capability == "media.tools" &&
+            _hostCapabilities.Contains(PluginHostCapabilityNames.MediaTools))
             return await DispatchMediaToolCallAsync(message, cancellationToken);
 
         throw new PluginOperationException(new PluginError("plugin.capability.denied", "The host did not grant this capability."));
@@ -361,10 +366,17 @@ internal sealed class PluginWorkerProcess : IDisposable
                 return PluginWorkerJson.ToElement(await _mediaTools.IsDestinationAvailableAsync(
                     request.CatalogId, request.CatalogTypeSlug, cancellationToken));
             }
-            case "has-specialized-download":
+            case "has-other-stream-action":
             {
-                var request = PluginWorkerJson.Deserialize<PluginWorkerSpecializedDownloadArguments>(message.Arguments);
-                return PluginWorkerJson.ToElement(await _mediaTools.HasSpecializedDownloadActionAsync(request.Kind, cancellationToken));
+                var request = PluginWorkerJson.Deserialize<PluginWorkerActionPresenceArguments>(message.Arguments);
+                return PluginWorkerJson.ToElement(await _mediaTools.HasOtherStreamItemActionAsync(
+                    request.PluginId, request.Kind, cancellationToken));
+            }
+            case "has-online-stream-provider":
+            {
+                var request = PluginWorkerJson.Deserialize<PluginWorkerMediaKindArguments>(message.Arguments);
+                return PluginWorkerJson.ToElement(await _mediaTools.HasOnlineStreamProviderAsync(
+                    request.Kind, cancellationToken));
             }
             case "resolve-stream":
             {
@@ -452,7 +464,11 @@ internal sealed class PluginWorkerProcess : IDisposable
         }
     }
 
-    private static ProcessStartInfo CreateStartInfo(string pluginAssembly, string pluginId, string workerHome)
+    private static ProcessStartInfo CreateStartInfo(
+        string pluginAssembly,
+        string pluginId,
+        string workerHome,
+        IReadOnlySet<string> hostCapabilities)
     {
         var processPath = Environment.ProcessPath
             ?? throw new InvalidOperationException("The API process path is unavailable for starting plugin workers.");
@@ -489,6 +505,7 @@ internal sealed class PluginWorkerProcess : IDisposable
         startInfo.ArgumentList.Add(pluginAssembly);
         startInfo.ArgumentList.Add(pluginId);
         startInfo.ArgumentList.Add(workerHome);
+        startInfo.ArgumentList.Add(string.Join(',', hostCapabilities.Order(StringComparer.OrdinalIgnoreCase)));
 
         var systemRoot = Environment.GetEnvironmentVariable("SystemRoot");
         var windir = Environment.GetEnvironmentVariable("WINDIR");

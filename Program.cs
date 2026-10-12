@@ -11,6 +11,12 @@ using MediaPager.App.Api.Controllers;
 using MediaPager.App.Core.Services;
 using NoBugsGiven.Quasar.Interop;
 
+if (ApiRestartBootstrapper.IsBootstrapMode(args))
+{
+    await ApiRestartBootstrapper.RunAsync(args);
+    return;
+}
+
 if (PluginWorkerCommand.IsWorkerMode(args))
 {
     Environment.ExitCode = await PluginWorkerCommand.RunAsync(args);
@@ -249,6 +255,14 @@ builder.Services.AddSingleton<IPluginWorkerFactory, PluginWorkerFactory>();
 builder.Services.AddSingleton<PluginDeployer>();
 builder.Services.AddSingleton<PluginInstaller>();
 builder.Services.AddSingleton<PluginJobsService>();
+builder.Services.AddSingleton<ApiRestartCoordinator>(services => new ApiRestartCoordinator(
+    args,
+    PluginDirectories.Community(builder.Configuration),
+    string.Equals(Environment.GetEnvironmentVariable("MEDIAPAGER_TOOLS_BOOTSTRAP_EXTERNAL"), "true", StringComparison.OrdinalIgnoreCase) ||
+    string.Equals(Environment.GetEnvironmentVariable("DOTNET_RUNNING_IN_CONTAINER"), "true", StringComparison.OrdinalIgnoreCase),
+    builder.Configuration.GetValue<bool>("Desktop:Mode"),
+    services.GetRequiredService<IHostApplicationLifetime>(),
+    services.GetRequiredService<ILogger<ApiRestartCoordinator>>()));
 builder.Services.AddSingleton<ILibraryQuery, LibraryQuery>();
 builder.Services.AddSingleton<ILibraryStore, LibraryStore>();
 builder.Services.AddSingleton<IMediaToolBroker, FfmpegMediaToolBroker>();
@@ -382,6 +396,9 @@ var officialDirectory = PluginDirectories.Official(builder.Configuration);
 var communityDirectory = PluginDirectories.Community(builder.Configuration);
 Directory.CreateDirectory(officialDirectory);
 Directory.CreateDirectory(communityDirectory);
+ApiRestartBootstrapper.CleanupPendingUninstalls(
+    communityDirectory,
+    message => app.Logger.LogWarning("{PendingPluginRemoval}", message));
 
 // Structural official tagging: reserve every official id (list, installed or not) plus
 // the ids actually loaded, so a community plugin can never shadow an official one —

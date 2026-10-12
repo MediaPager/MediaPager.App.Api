@@ -1,6 +1,6 @@
 # FFmpeg toolchain
 
-MediaPager downloads checksum-pinned FFmpeg and FFprobe binaries at first use into the
+MediaPager provisions checksum-pinned FFmpeg and FFprobe binaries at first use into the
 managed tools directory (`Tools:Directory/ffmpeg/9.0.2/<runtime-id>`). It does not search
 the host `PATH` or install software through the host operating system's package manager.
 

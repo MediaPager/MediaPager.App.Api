@@ -37,8 +37,15 @@ public sealed class CatalogItemsController(
         if (!isMusicCatalog) return NotFound(new { error = "The music catalog was not found." });
 
         var musicItems = database.CatalogItems.AsNoTracking().Where(item => item.CatalogId == catalogId);
-        var artists = await musicItems.CountAsync(item => item.Kind == "artist" && item.ParentId == null, cancellationToken);
-        var albums = await musicItems.CountAsync(item => item.Kind == "album", cancellationToken);
+        var artists = await musicItems.CountAsync(artist => artist.Kind == "artist" && artist.ParentId == null &&
+            (database.CatalogItems.Any(album => album.CatalogId == catalogId && album.Kind == "album" && album.ParentId == artist.Id &&
+                database.CatalogItems.Any(track => track.CatalogId == catalogId && track.ParentId == album.Id && track.Kind != "artist" && track.Kind != "album")) ||
+             database.CatalogItemMusicArtistCredits.Any(credit => credit.ArtistCatalogItemId == artist.Id &&
+                credit.CatalogItem!.CatalogId == catalogId && credit.CatalogItem.Kind != "artist" && credit.CatalogItem.Kind != "album")),
+            cancellationToken);
+        var albums = await musicItems.CountAsync(album => album.Kind == "album" &&
+            database.CatalogItems.Any(track => track.CatalogId == catalogId && track.ParentId == album.Id &&
+                                               track.Kind != "artist" && track.Kind != "album"), cancellationToken);
         var tracks = await musicItems.CountAsync(item => item.Kind != "artist" && item.Kind != "album", cancellationToken);
         var unorganizedTracks = await musicItems.CountAsync(item => item.Kind != "artist" && item.Kind != "album" && item.ParentId == null, cancellationToken);
         var genres = await database.CatalogItemTags.AsNoTracking()
@@ -94,8 +101,21 @@ public sealed class CatalogItemsController(
             query = query.Where(item => item.Kind != "artist" && item.Kind != "album");
         else
             query = query.Where(item => item.Kind == level);
-        if (level == "artist") query = query.Where(item => item.ParentId == null);
-        else if (parentId is int parent) query = query.Where(item => item.ParentId == parent);
+        if (level == "artist")
+        {
+            query = query.Where(artist => artist.ParentId == null &&
+                (database.CatalogItems.Any(album => album.CatalogId == catalogId && album.Kind == "album" && album.ParentId == artist.Id &&
+                    database.CatalogItems.Any(track => track.CatalogId == catalogId && track.ParentId == album.Id && track.Kind != "artist" && track.Kind != "album")) ||
+                 database.CatalogItemMusicArtistCredits.Any(credit => credit.ArtistCatalogItemId == artist.Id &&
+                    credit.CatalogItem!.CatalogId == catalogId && credit.CatalogItem.Kind != "artist" && credit.CatalogItem.Kind != "album")));
+        }
+        else if (level == "album")
+        {
+            query = query.Where(album => database.CatalogItems.Any(track => track.CatalogId == catalogId &&
+                track.ParentId == album.Id && track.Kind != "artist" && track.Kind != "album"));
+        }
+        if ((level is "album" or "track") && parentId is int parent)
+            query = query.Where(item => item.ParentId == parent);
         if (!string.IsNullOrWhiteSpace(queryText))
         {
             var normalizedQuery = queryText.Trim().ToLowerInvariant();
@@ -111,18 +131,21 @@ public sealed class CatalogItemsController(
         }
         if (year is int selectedYear) query = query.Where(item => item.Year == selectedYear);
 
+        var artistCreditRole = level == "album" ? "album-artist" : "artist";
         var totalItems = await query.CountAsync(cancellationToken);
         query = sort.Trim().ToLowerInvariant() switch
         {
             "artist" => query.OrderBy(item => item.MusicArtistCredits
-                .Where(credit => credit.Role == "artist")
+                .Where(credit => credit.Role == artistCreditRole)
                 .OrderBy(credit => credit.Position)
                 .Select(credit => credit.ArtistCatalogItem!.Title)
                 .FirstOrDefault() ?? "")
                 .ThenBy(item => item.SortTitle ?? item.Title),
             "album" => query.OrderBy(item => item.Parent!.Title).ThenBy(item => item.SortTitle ?? item.Title),
             "year" => query.OrderBy(item => item.Year == null).ThenByDescending(item => item.Year).ThenBy(item => item.SortTitle ?? item.Title),
-            "recent" => query.OrderByDescending(item => item.CreatedAt).ThenBy(item => item.Id),
+            // SQLite stores DateTimeOffset values as text but cannot order by them through
+            // EF Core; monotonically increasing item ids provide a portable recent-first key.
+            "recent" => query.OrderByDescending(item => item.Id),
             _ => query.OrderBy(item => item.SortTitle ?? item.Title).ThenBy(item => item.Id),
         };
         var items = await query
@@ -247,6 +270,10 @@ public sealed class CatalogItemsController(
             OriginalAvailableAt = originalAvailableAt,
             ContentRating = string.IsNullOrWhiteSpace(request.ContentRating) ? null : request.ContentRating.Trim().ToUpperInvariant(),
             Rating = request.Rating,
+            ImdbId = CleanIdentifier(request.ImdbId),
+            Isbn = CleanIdentifier(request.Isbn),
+            MusicBrainzId = CleanIdentifier(request.MusicBrainzId),
+            Isrc = CleanIdentifier(request.Isrc),
         };
         foreach (var genre in (request.Genres ?? []).Select(value => value.Trim()).Where(value => value.Length > 0)
                      .Distinct(StringComparer.OrdinalIgnoreCase))
@@ -295,6 +322,13 @@ public sealed class CatalogItemsController(
             .ThenInclude(catalog => catalog!.CatalogType)
             .FirstOrDefaultAsync(entry => entry.Id == id, cancellationToken);
         if (item is null) return NotFound();
+        var originalParentId = item.ParentId;
+        var previousArtistIds = request.Artist is null
+            ? []
+            : await database.CatalogItemMusicArtistCredits.AsNoTracking()
+                .Where(credit => credit.CatalogItemId == item.Id && credit.Role == "artist")
+                .Select(credit => credit.ArtistCatalogItemId)
+                .ToListAsync(cancellationToken);
 
         if (request.Title is not null)
         {
@@ -310,6 +344,11 @@ public sealed class CatalogItemsController(
             item.SortTitle = string.IsNullOrWhiteSpace(request.SortTitle) ? null : request.SortTitle.Trim();
         if (request.OriginalTitle is not null)
             item.OriginalTitle = string.IsNullOrWhiteSpace(request.OriginalTitle) ? null : request.OriginalTitle.Trim();
+        if (request.ExternalId is not null) item.ExternalId = CleanIdentifier(request.ExternalId);
+        if (request.ImdbId is not null) item.ImdbId = CleanIdentifier(request.ImdbId);
+        if (request.Isbn is not null) item.Isbn = CleanIdentifier(request.Isbn);
+        if (request.MusicBrainzId is not null) item.MusicBrainzId = CleanIdentifier(request.MusicBrainzId);
+        if (request.Isrc is not null) item.Isrc = CleanIdentifier(request.Isrc);
         if (request.ContentRating is not null)
             item.ContentRating = string.IsNullOrWhiteSpace(request.ContentRating) ? null : request.ContentRating.Trim().ToUpperInvariant();
         if (request.OriginalAvailableAt is not null)
@@ -343,6 +382,10 @@ public sealed class CatalogItemsController(
             release.Year = request.Year;
         item.ModifiedAt = DateTimeOffset.UtcNow;
         await database.SaveChangesAsync(cancellationToken);
+        if (originalParentId != item.ParentId)
+            previousArtistIds.Add(originalParentId ?? 0);
+        await MusicCatalogHierarchy.PruneEmptyAncestorsAsync(
+            database, previousArtistIds.Where(candidateId => candidateId > 0), cancellationToken);
 
         var updated = await LoadAsync(id, cancellationToken);
         return Ok(await ToDtoAsync(updated!, cancellationToken));
@@ -670,8 +713,14 @@ public sealed class CatalogItemsController(
     {
         var item = await database.CatalogItems.FirstOrDefaultAsync(entry => entry.Id == id, cancellationToken);
         if (item is null) return NotFound();
+        var candidateIds = await database.CatalogItemMusicArtistCredits.AsNoTracking()
+            .Where(credit => credit.CatalogItemId == item.Id)
+            .Select(credit => credit.ArtistCatalogItemId)
+            .ToListAsync(cancellationToken);
+        if (item.ParentId is int parentId) candidateIds.Add(parentId);
         database.CatalogItems.Remove(item);
         await database.SaveChangesAsync(cancellationToken);
+        await MusicCatalogHierarchy.PruneEmptyAncestorsAsync(database, candidateIds, cancellationToken);
         return NoContent();
     }
 
@@ -778,6 +827,8 @@ public sealed class CatalogItemsController(
         item.ImageUrl,
         item.BackdropUrl,
         item.ExternalId,
+        item.ImdbId,
+        item.Isbn,
         item.MusicBrainzId,
         item.Isrc,
         item.TrackNumber,
@@ -803,6 +854,9 @@ public sealed class CatalogItemsController(
         var trimmed = value.Trim();
         return trimmed.Length == 0 ? null : trimmed;
     }
+
+    private static string? CleanIdentifier(string? value) =>
+        string.IsNullOrWhiteSpace(value) ? null : value.Trim();
 
     private static string SafeUploadFileName(string originalName, string extension)
     {
@@ -914,7 +968,12 @@ public sealed record UpdateCatalogItemRequest(
     string? ContentRating = null,
     double? Rating = null,
     string? Artist = null,
-    string? Album = null);
+    string? Album = null,
+    string? ExternalId = null,
+    string? ImdbId = null,
+    string? Isbn = null,
+    string? MusicBrainzId = null,
+    string? Isrc = null);
 
 public sealed record ArtworkUrlRequest(string? Url);
 
@@ -932,6 +991,10 @@ public sealed class UploadCatalogItemRequest
     public string? OriginalAvailableAt { get; set; }
     public string? ContentRating { get; set; }
     public double? Rating { get; set; }
+    public string? ImdbId { get; set; }
+    public string? Isbn { get; set; }
+    public string? MusicBrainzId { get; set; }
+    public string? Isrc { get; set; }
     public string[]? Genres { get; set; }
 }
 

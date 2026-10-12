@@ -172,6 +172,12 @@ namespace MediaPager.App.Api.Migrations.PostgreSql
                     b.Property<string>("ImageUrl")
                         .HasColumnType("text");
 
+                    b.Property<string>("ImdbId")
+                        .HasColumnType("text");
+
+                    b.Property<string>("Isbn")
+                        .HasColumnType("text");
+
                     b.Property<string>("Isrc")
                         .HasColumnType("text");
 

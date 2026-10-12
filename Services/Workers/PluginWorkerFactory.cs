@@ -4,36 +4,32 @@ using MediaPager.App.PluginContracts;
 
 namespace MediaPager.App.Api.Services.Workers;
 
-/// <summary>Starts selected community plugins out of process and returns host-side proxies
-/// for their declared capabilities. VidSrc and Downloads are the first migrated plugins.
-/// Workers use platform restrictions where available, but still run under the host's OS identity.</summary>
+/// <summary>Starts manifest-selected plugins out of process and returns host-side proxies
+/// for their declared capabilities. Workers use platform restrictions where available, but
+/// still run under the host's OS identity.</summary>
 public sealed class PluginWorkerFactory(ILoggerFactory loggerFactory) : IPluginWorkerFactory, IAsyncDisposable
 {
     private readonly object _gate = new();
     private readonly Dictionary<string, PluginWorkerProcess> _workers = new(StringComparer.OrdinalIgnoreCase);
     private bool _disposed;
 
-    public bool ShouldRunInWorker(string pluginId, bool official) =>
-        !official && (string.Equals(pluginId, "mediapager.stream.vidsrc", StringComparison.OrdinalIgnoreCase) ||
-                      string.Equals(pluginId, "mediapager.actions.downloads", StringComparison.OrdinalIgnoreCase));
+    public bool ShouldRunInWorker(PluginManifest? manifest, bool official) => manifest?.Worker == true;
 
     public IReadOnlyList<IMediaPagerPlugin> LoadWorker(
         IServiceProvider hostServices,
         string pluginDirectory,
-        string pluginId)
+        string pluginId,
+        IReadOnlySet<string> hostCapabilities)
     {
-        if (!ShouldRunInWorker(pluginId, official: false))
-            throw new InvalidOperationException($"No out-of-process worker is registered for '{pluginId}'.");
-
         var settings = hostServices.GetRequiredService<IPluginSettingsRepository>();
         var activityStore = hostServices.GetRequiredService<PluginActivityStore>();
         var activity = new PluginActivity(activityStore) { PluginId = pluginId };
         var browser = hostServices.GetRequiredService<IBrowserAutomationBroker>();
         var mediaTools = hostServices.GetRequiredService<IMediaToolBroker>();
         var workerDescription = StartWorker(
-            pluginDirectory, pluginId, settings, activity, browser, mediaTools, activityStore);
+            pluginDirectory, pluginId, settings, activity, browser, mediaTools, activityStore, hostCapabilities);
         var lease = new WorkerLease(
-            () => GetOrRestartWorker(pluginDirectory, pluginId, settings, activity, browser, mediaTools, activityStore),
+            () => GetOrRestartWorker(pluginDirectory, pluginId, settings, activity, browser, mediaTools, activityStore, hostCapabilities),
             () => StopWorker(pluginId));
 
         if (workerDescription.IsStreamProvider)
@@ -51,7 +47,8 @@ public sealed class PluginWorkerFactory(ILoggerFactory loggerFactory) : IPluginW
         IPluginActivity activity,
         IBrowserAutomationBroker browser,
         IMediaToolBroker mediaTools,
-        PluginActivityStore activityStore)
+        PluginActivityStore activityStore,
+        IReadOnlySet<string> hostCapabilities)
     {
         lock (_gate)
         {
@@ -64,7 +61,7 @@ public sealed class PluginWorkerFactory(ILoggerFactory loggerFactory) : IPluginW
                 existing.Dispose();
             }
 
-            var worker = CreateWorker(pluginDirectory, pluginId, settings, activity, browser, mediaTools, activityStore);
+            var worker = CreateWorker(pluginDirectory, pluginId, settings, activity, browser, mediaTools, activityStore, hostCapabilities);
             try
             {
                 var description = worker.StartAndDescribe();
@@ -89,7 +86,8 @@ public sealed class PluginWorkerFactory(ILoggerFactory loggerFactory) : IPluginW
         IPluginActivity activity,
         IBrowserAutomationBroker browser,
         IMediaToolBroker mediaTools,
-        PluginActivityStore activityStore)
+        PluginActivityStore activityStore,
+        IReadOnlySet<string> hostCapabilities)
     {
         lock (_gate)
         {
@@ -102,7 +100,7 @@ public sealed class PluginWorkerFactory(ILoggerFactory loggerFactory) : IPluginW
                 worker.Dispose();
             }
 
-            var replacement = CreateWorker(pluginDirectory, pluginId, settings, activity, browser, mediaTools, activityStore);
+            var replacement = CreateWorker(pluginDirectory, pluginId, settings, activity, browser, mediaTools, activityStore, hostCapabilities);
             try
             {
                 var description = replacement.StartAndDescribe();
@@ -126,8 +124,10 @@ public sealed class PluginWorkerFactory(ILoggerFactory loggerFactory) : IPluginW
         IPluginActivity activity,
         IBrowserAutomationBroker browser,
         IMediaToolBroker mediaTools,
-        PluginActivityStore activityStore) =>
+        PluginActivityStore activityStore,
+        IReadOnlySet<string> hostCapabilities) =>
         new(pluginDirectory, pluginId, settings, activity, browser, mediaTools,
+            hostCapabilities,
             jobId => { activityStore.CancelJob(jobId); },
             loggerFactory.CreateLogger($"PluginWorker.{pluginId}"));
 
@@ -196,7 +196,7 @@ internal sealed class PluginWorkerStreamProviderProxy(
     public IReadOnlyList<PluginActionDescriptor> Actions => description.Actions;
 
     public Task<IReadOnlyList<PluginActionDescriptor>> GetActionsAsync(CancellationToken cancellationToken) =>
-        Task.FromResult<IReadOnlyList<PluginActionDescriptor>>(description.Actions);
+        getWorker().InvokeAsync<IReadOnlyList<PluginActionDescriptor>>("actions.list", new { }, cancellationToken);
 
     public async Task InvokeActionAsync(PluginActionContext context, CancellationToken cancellationToken) =>
         _ = await getWorker().InvokeAsync<bool>("actions.invoke", new PluginWorkerActionArguments(context), cancellationToken);
@@ -240,7 +240,7 @@ internal sealed class PluginWorkerActionProxy(
     public IReadOnlyList<PluginMenuEntry> MainNav => description.MainNav;
 
     public Task<IReadOnlyList<PluginActionDescriptor>> GetActionsAsync(CancellationToken cancellationToken) =>
-        Task.FromResult<IReadOnlyList<PluginActionDescriptor>>(description.Actions);
+        getWorker().InvokeAsync<IReadOnlyList<PluginActionDescriptor>>("actions.list", new { }, cancellationToken);
 
     public async Task InvokeActionAsync(PluginActionContext context, CancellationToken cancellationToken) =>
         _ = await getWorker().InvokeAsync<bool>("actions.invoke", new PluginWorkerActionArguments(context), cancellationToken);

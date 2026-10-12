@@ -70,8 +70,8 @@ public sealed class FfmpegToolInstaller(
                     var artifact = artifacts.Archives[index];
                     var archivePath = Path.Combine(archivesDirectory, artifact.FileName);
                     progress?.Report(new MediaToolProgress(0.01 + (index / (double)artifacts.Archives.Count * 0.07),
-                        $"Downloading pinned FFmpeg tools ({index + 1}/{artifacts.Archives.Count})…"));
-                    await DownloadVerifiedAsync(artifact, archivePath, index, artifacts.Archives.Count, progress, cancellationToken);
+                        $"Installing pinned FFmpeg tools ({index + 1}/{artifacts.Archives.Count})…"));
+                    await FetchVerifiedArchiveAsync(artifact, archivePath, index, artifacts.Archives.Count, progress, cancellationToken);
                     await ExtractZipSafelyAsync(archivePath, extractedDirectory, cancellationToken);
                 }
 
@@ -180,7 +180,7 @@ public sealed class FfmpegToolInstaller(
         }
     }
 
-    private async Task DownloadVerifiedAsync(
+    private async Task FetchVerifiedArchiveAsync(
         ArchiveArtifact artifact,
         string destination,
         int archiveIndex,
@@ -191,7 +191,7 @@ public sealed class FfmpegToolInstaller(
         using var response = await httpClient.GetAsync(artifact.Url, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
         response.EnsureSuccessStatusCode();
         if (response.RequestMessage?.RequestUri?.Scheme != Uri.UriSchemeHttps)
-            throw new InvalidDataException("The tool archive download did not remain on HTTPS.");
+            throw new InvalidDataException("The tool archive request did not remain on HTTPS.");
         if (response.Content.Headers.ContentLength is > MaximumArchiveBytes)
             throw new InvalidDataException($"The tool archive '{artifact.FileName}' exceeds the configured size limit.");
 
@@ -216,7 +216,7 @@ public sealed class FfmpegToolInstaller(
                 {
                     lastReportedPercent = percent;
                     var overall = 0.01 + ((archiveIndex + percent / 100d) / archiveCount * 0.07);
-                    progress?.Report(new MediaToolProgress(overall, $"Downloading {artifact.FileName} ({percent}%)…"));
+                    progress?.Report(new MediaToolProgress(overall, $"Preparing {artifact.FileName} ({percent}%)…"));
                 }
             }
         }

@@ -17,7 +17,7 @@ public sealed class ManagedToolsBootstrapService(
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        // BackgroundService.StartAsync must return before downloads begin so Kestrel and the
+        // BackgroundService.StartAsync must return before tool setup begins so Kestrel and the
         // bundled SPA can serve the warm-up activity while tools are provisioned.
         await Task.Yield();
         try
@@ -38,7 +38,7 @@ public sealed class ManagedToolsBootstrapService(
             bootstrapState.Complete();
         }
 
-        // Keep the API/runtime startup independent of SDK downloads. Once media tools are
+        // Keep the API/runtime startup independent of SDK setup. Once media tools are
         // ready (or their bootstrap has reported a failure), prepare the pinned plugin-build
         // SDK in the same managed-tools cache.
         await BootstrapPluginBuildSdkAsync(stoppingToken);

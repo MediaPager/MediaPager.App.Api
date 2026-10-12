@@ -7,9 +7,18 @@ namespace MediaPager.App.Api.Controllers;
 [Route("movies")]
 public sealed class MoviesController(IHttpClientFactory httpClientFactory, IPluginSettingsRepository pluginSettings) : ControllerBase
 {
-    // GET /movies?q=&page=1 — TMDB v3. movie/popular when no search, search/movie when searching.
+    // GET /movies — TMDB popular/search results or discover results when filters are supplied.
     [HttpGet]
-    public async Task<IActionResult> ListMovies([FromQuery(Name = "q")] string? q, [FromQuery] int page = 1, CancellationToken cancellationToken = default)
+    public async Task<IActionResult> ListMovies(
+        [FromQuery(Name = "q")] string? q,
+        [FromQuery] int? genreId = null,
+        [FromQuery] int? year = null,
+        [FromQuery] double? minRating = null,
+        [FromQuery] int? minVoteCount = null,
+        [FromQuery] string? language = null,
+        [FromQuery] string? sortBy = null,
+        [FromQuery] int page = 1,
+        CancellationToken cancellationToken = default)
     {
         var apiKey = await TmdbHelpers.GetApiKeyAsync(pluginSettings, cancellationToken);
         if (string.IsNullOrWhiteSpace(apiKey))
@@ -17,6 +26,20 @@ public sealed class MoviesController(IHttpClientFactory httpClientFactory, IPlug
 
         var searchQuery = (q ?? "").Trim();
         var currentPage = page > 0 ? page : 1;
+        var allowedSorts = new[]
+        {
+            "popularity.desc", "popularity.asc", "vote_average.desc", "vote_average.asc",
+            "primary_release_date.desc", "primary_release_date.asc", "title.asc", "title.desc",
+        };
+        var sort = sortBy is not null && allowedSorts.Contains(sortBy, StringComparer.OrdinalIgnoreCase)
+            ? sortBy
+            : "popularity.desc";
+        if (year is < 1870 or > 2200) return BadRequest(new { error = "Year must be between 1870 and 2200." });
+        if (minRating is < 0 or > 10) return BadRequest(new { error = "Minimum rating must be between 0 and 10." });
+        if (minVoteCount is < 0 or > 1_000_000) return BadRequest(new { error = "Minimum votes must be between 0 and 1000000." });
+        language = NormalizeLanguage(language);
+        var hasDiscoverFilters = genreId is not null || year is not null || minRating is not null ||
+                                 minVoteCount is not null || language is not null || sortBy is not null;
 
         // "cast: <name>" searches movies featuring that cast member:
         // resolve the name via search/person, then discover/movie?with_cast={id}.
@@ -55,6 +78,13 @@ public sealed class MoviesController(IHttpClientFactory httpClientFactory, IPlug
                 return Ok(new PagedResponse(1, 1, 0, []));
 
             var discoverUrl = $"https://api.themoviedb.org/3/discover/movie?api_key={Uri.EscapeDataString(apiKey)}&language=en-US&sort_by=popularity.desc&page={currentPage}&with_cast={personId}";
+            if (genreId is int castGenre) discoverUrl += $"&with_genres={castGenre}";
+            if (year is int castYear) discoverUrl += $"&primary_release_year={castYear}";
+            if (minRating is double castRating)
+                discoverUrl += $"&vote_average.gte={castRating.ToString(System.Globalization.CultureInfo.InvariantCulture)}";
+            if (minVoteCount is int castVoteCount) discoverUrl += $"&vote_count.gte={castVoteCount}";
+            if (language is not null) discoverUrl += $"&with_original_language={Uri.EscapeDataString(language)}";
+            if (sortBy is not null) discoverUrl += $"&sort_by={Uri.EscapeDataString(sort)}";
             TmdbResponse? discoverData;
             var discoverBody = "";
             try
@@ -95,7 +125,9 @@ public sealed class MoviesController(IHttpClientFactory httpClientFactory, IPlug
             return Ok(new PagedResponse(discoverData.Page, discoverData.TotalPages, discoverData.TotalResults, discoverResults));
         }
 
-        var endpoint = string.IsNullOrEmpty(searchQuery) ? "movie/popular" : "search/movie";
+        var endpoint = !string.IsNullOrEmpty(searchQuery)
+            ? "search/movie"
+            : hasDiscoverFilters ? "discover/movie" : "movie/popular";
 
         var queryParams = new List<string>
         {
@@ -103,8 +135,17 @@ public sealed class MoviesController(IHttpClientFactory httpClientFactory, IPlug
             "language=en-US",
             $"page={currentPage}",
         };
-        if (!string.IsNullOrEmpty(searchQuery))
-            queryParams.Add($"query={Uri.EscapeDataString(searchQuery)}");
+        if (!string.IsNullOrEmpty(searchQuery)) queryParams.Add($"query={Uri.EscapeDataString(searchQuery)}");
+        if (endpoint == "discover/movie")
+        {
+            queryParams.Add($"sort_by={Uri.EscapeDataString(sort)}");
+            if (genreId is int selectedGenre) queryParams.Add($"with_genres={selectedGenre}");
+            if (year is int releaseYear) queryParams.Add($"primary_release_year={releaseYear}");
+            if (minRating is double rating)
+                queryParams.Add($"vote_average.gte={rating.ToString(System.Globalization.CultureInfo.InvariantCulture)}");
+            if (minVoteCount is int voteCount) queryParams.Add($"vote_count.gte={voteCount}");
+            if (language is not null) queryParams.Add($"with_original_language={Uri.EscapeDataString(language)}");
+        }
 
         var url = $"https://api.themoviedb.org/3/{endpoint}?{string.Join("&", queryParams)}";
 
@@ -134,7 +175,27 @@ public sealed class MoviesController(IHttpClientFactory httpClientFactory, IPlug
             return TmdbHelpers.TmdbNotJsonResult(body);
 
         var imageBase = await TmdbHelpers.GetImageBaseAsync(pluginSettings, cancellationToken);
-        var results = data.Results
+        IEnumerable<UpstreamMovie> filteredResults = data.Results
+            .Where(movie => genreId is null || movie.GenreIds?.Contains(genreId.Value) == true)
+            .Where(movie => year is null || TmdbHelpers.Year(movie.ReleaseDate ?? movie.FirstAirDate) == year.Value.ToString(System.Globalization.CultureInfo.InvariantCulture))
+            .Where(movie => minRating is null || movie.VoteAverage >= minRating.Value)
+            .Where(movie => minVoteCount is null || movie.VoteCount >= minVoteCount.Value)
+            .Where(movie => language is null || string.Equals(movie.OriginalLanguage, language, StringComparison.OrdinalIgnoreCase));
+        if (endpoint == "search/movie" && sortBy is not null)
+        {
+            filteredResults = sort switch
+            {
+                "popularity.asc" => filteredResults.OrderBy(movie => movie.Popularity),
+                "vote_average.desc" => filteredResults.OrderByDescending(movie => movie.VoteAverage),
+                "vote_average.asc" => filteredResults.OrderBy(movie => movie.VoteAverage),
+                "primary_release_date.desc" => filteredResults.OrderByDescending(movie => movie.ReleaseDate),
+                "primary_release_date.asc" => filteredResults.OrderBy(movie => movie.ReleaseDate),
+                "title.asc" => filteredResults.OrderBy(movie => movie.Title),
+                "title.desc" => filteredResults.OrderByDescending(movie => movie.Title),
+                _ => filteredResults.OrderByDescending(movie => movie.Popularity),
+            };
+        }
+        var results = filteredResults
             .Select(m => new MovieSummary(
                 Id: m.Id,
                 Year: TmdbHelpers.Year(m.ReleaseDate ?? m.FirstAirDate),
@@ -147,6 +208,42 @@ public sealed class MoviesController(IHttpClientFactory httpClientFactory, IPlug
             .ToList();
 
         return Ok(new PagedResponse(data.Page, data.TotalPages, data.TotalResults, results));
+    }
+
+    private static string? NormalizeLanguage(string? language)
+    {
+        if (string.IsNullOrWhiteSpace(language)) return null;
+        var normalized = language.Trim().ToLowerInvariant();
+        return normalized.Length == 2 && normalized.All(char.IsAsciiLetter) ? normalized : null;
+    }
+
+    [HttpGet("genres")]
+    public async Task<IActionResult> ListGenres(CancellationToken cancellationToken)
+    {
+        var apiKey = await TmdbHelpers.GetApiKeyAsync(pluginSettings, cancellationToken);
+        if (string.IsNullOrWhiteSpace(apiKey)) return TmdbHelpers.MissingApiKeyResult();
+        var url = $"https://api.themoviedb.org/3/genre/movie/list?api_key={Uri.EscapeDataString(apiKey)}&language=en-US";
+        var body = "";
+        try
+        {
+            var client = httpClientFactory.CreateClient("upstream");
+            using var response = await client.GetAsync(url, cancellationToken);
+            body = await response.Content.ReadAsStringAsync(cancellationToken);
+            if (!response.IsSuccessStatusCode)
+                return TmdbHelpers.TmdbFailureResult((int)response.StatusCode, response.ReasonPhrase, body);
+            var result = JsonSerializer.Deserialize<TmdbGenreList>(body);
+            return result?.Genres is null
+                ? TmdbHelpers.TmdbNotJsonResult(body)
+                : Ok(result.Genres.OrderBy(genre => genre.Name).Select(genre => new { genre.Id, genre.Name }));
+        }
+        catch (JsonException)
+        {
+            return TmdbHelpers.TmdbNotJsonResult(body);
+        }
+        catch (Exception exception)
+        {
+            return Problem($"TMDB request failed: {exception.Message}", statusCode: StatusCodes.Status502BadGateway);
+        }
     }
 
     // GET /movies/{id}/details — TMDB v3 movie details + credits + similar, for the detail screen.
@@ -220,6 +317,7 @@ public sealed class MoviesController(IHttpClientFactory httpClientFactory, IPlug
             Genres: (data.Genres ?? []).Select(g => g.Name ?? "-").ToList(),
             Director: director,
             Cast: cast,
-            Related: related));
+            Related: related,
+            ImdbId: data.ImdbId));
     }
 }

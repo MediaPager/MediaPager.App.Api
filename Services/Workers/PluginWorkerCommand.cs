@@ -4,6 +4,7 @@ using System.Runtime.Loader;
 using System.Text;
 using System.Text.Json;
 using System.Threading.Channels;
+using MediaPager.App.Core.Plugins;
 using MediaPager.App.PluginContracts;
 using Microsoft.Extensions.DependencyInjection;
 
@@ -15,18 +16,22 @@ internal static class PluginWorkerCommand
 
     public static async Task<int> RunAsync(string[] args)
     {
-        if (args.Length is < 3 or > 4)
+        if (args.Length is < 3 or > 5)
         {
-            Console.Error.WriteLine("Plugin worker expects: --plugin-worker <assembly-path> <plugin-id> [worker-home].");
+            Console.Error.WriteLine("Plugin worker expects: --plugin-worker <assembly-path> <plugin-id> [worker-home] [host-capabilities].");
             return 2;
         }
 
         var assemblyPath = Path.GetFullPath(args[1]);
         var pluginId = args[2];
-        var workerHome = args.Length == 4
+        var workerHome = args.Length >= 4
             ? Path.GetFullPath(args[3])
             : Environment.GetEnvironmentVariable(OperatingSystem.IsWindows() ? "USERPROFILE" : "HOME")
               ?? Path.GetTempPath();
+        var hostCapabilities = args.Length == 5
+            ? args[4].Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase)
+            : new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         if (OperatingSystem.IsWindows())
         {
             ClearWorkerEnvironment(workerHome);
@@ -61,7 +66,7 @@ internal static class PluginWorkerCommand
             var assembly = AssemblyLoadContext.Default.LoadFromAssemblyPath(assemblyPath);
             Console.Error.WriteLine($"[plugin-worker:{pluginId}] loaded assembly.");
             var host = new PluginWorkerHostClient(Console.In, output);
-            var services = new PluginWorkerServiceProvider(host, pluginId);
+            var services = new PluginWorkerServiceProvider(host, pluginId, hostCapabilities);
             var plugins = new List<IMediaPagerPlugin>();
             foreach (var type in assembly.GetExportedTypes())
             {
@@ -184,6 +189,8 @@ internal static class PluginWorkerCommand
                 PluginWorkerJson.Deserialize<PluginWorkerDetailsArguments>(request.Arguments), cancellationToken),
             "stream.resolve" when mediaPlugin is IStreamProviderPlugin stream => await DispatchResolveAsync(stream,
                 PluginWorkerJson.Deserialize<PluginWorkerResolveArguments>(request.Arguments), cancellationToken),
+            "actions.list" when mediaPlugin is IPluginActions actionProvider =>
+                await actionProvider.GetActionsAsync(cancellationToken),
             "actions.invoke" when mediaPlugin is IPluginActions actions => await DispatchActionAsync(actions, request, cancellationToken),
             _ => throw new InvalidOperationException($"Unsupported worker operation '{request.Operation}'."),
         };
@@ -467,8 +474,14 @@ internal sealed class WorkerMediaToolBroker(PluginWorkerHostClient host) : IMedi
         host.CallHostAsync<bool>("media.tools", "destination-available",
             new { catalogId, catalogTypeSlug }, cancellationToken);
 
-    public Task<bool> HasSpecializedDownloadActionAsync(MediaKind kind, CancellationToken cancellationToken = default) =>
-        host.CallHostAsync<bool>("media.tools", "has-specialized-download", new { kind }, cancellationToken);
+    public Task<bool> HasOtherStreamItemActionAsync(
+        string pluginId,
+        MediaKind kind,
+        CancellationToken cancellationToken = default) =>
+        host.CallHostAsync<bool>("media.tools", "has-other-stream-action", new { pluginId, kind }, cancellationToken);
+
+    public Task<bool> HasOnlineStreamProviderAsync(MediaKind kind, CancellationToken cancellationToken = default) =>
+        host.CallHostAsync<bool>("media.tools", "has-online-stream-provider", new { kind }, cancellationToken);
 
     public Task<ResolvedStreamSource?> ResolveStreamAsync(PluginActionContext context, CancellationToken cancellationToken = default) =>
         host.CallHostAsync<ResolvedStreamSource?>("media.tools", "resolve-stream",
@@ -482,7 +495,10 @@ internal sealed class WorkerMediaToolBroker(PluginWorkerHostClient host) : IMedi
             new PluginWorkerTransferArguments(request), cancellationToken, progress);
 }
 
-internal sealed class PluginWorkerServiceProvider(PluginWorkerHostClient host, string pluginId)
+internal sealed class PluginWorkerServiceProvider(
+    PluginWorkerHostClient host,
+    string pluginId,
+    IReadOnlySet<string> hostCapabilities)
     : IServiceProvider, IServiceProviderIsService
 {
     private readonly IPluginSettingsStore _settings = new WorkerSettingsStore(host, pluginId);
@@ -493,9 +509,11 @@ internal sealed class PluginWorkerServiceProvider(PluginWorkerHostClient host, s
     public object? GetService(Type serviceType)
     {
         if (serviceType == typeof(IPluginSettingsStore)) return _settings;
-        if (serviceType == typeof(IBrowserAutomationBroker)) return _browser;
+        if (serviceType == typeof(IBrowserAutomationBroker))
+            return hostCapabilities.Contains(PluginHostCapabilityNames.BrowserAutomation) ? _browser : null;
         if (serviceType == typeof(IPluginActivity)) return _activity;
-        if (serviceType == typeof(IMediaToolBroker)) return _mediaTools;
+        if (serviceType == typeof(IMediaToolBroker))
+            return hostCapabilities.Contains(PluginHostCapabilityNames.MediaTools) ? _mediaTools : null;
         if (serviceType == typeof(IServiceProvider)) return this;
         if (serviceType == typeof(IServiceProviderIsService)) return this;
         return null;
@@ -503,9 +521,9 @@ internal sealed class PluginWorkerServiceProvider(PluginWorkerHostClient host, s
 
     public bool IsService(Type serviceType) =>
         serviceType == typeof(IPluginSettingsStore) ||
-        serviceType == typeof(IBrowserAutomationBroker) ||
+        serviceType == typeof(IBrowserAutomationBroker) && hostCapabilities.Contains(PluginHostCapabilityNames.BrowserAutomation) ||
         serviceType == typeof(IPluginActivity) ||
-        serviceType == typeof(IMediaToolBroker) ||
+        serviceType == typeof(IMediaToolBroker) && hostCapabilities.Contains(PluginHostCapabilityNames.MediaTools) ||
         serviceType == typeof(IServiceProvider) ||
         serviceType == typeof(IServiceProviderIsService);
 }
