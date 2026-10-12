@@ -5,7 +5,7 @@ namespace MediaPager.App.Api.Controllers;
 
 [ApiController]
 [Route("movies")]
-public sealed class MoviesController(IHttpClientFactory httpClientFactory, IPluginSettingsStore pluginSettings) : ControllerBase
+public sealed class MoviesController(IHttpClientFactory httpClientFactory, IPluginSettingsRepository pluginSettings) : ControllerBase
 {
     // GET /movies?q=&page=1 — TMDB v3. movie/popular when no search, search/movie when searching.
     [HttpGet]

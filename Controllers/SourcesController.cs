@@ -14,12 +14,13 @@ namespace MediaPager.App.Api.Controllers;
 [Route("sources")]
 public sealed class SourcesController(
     PluginRegistry registry,
-    IPluginSettingsStore pluginSettings,
+    IPluginSettingsRepository pluginSettings,
     StreamSessionState sessions,
     IConfiguration configuration,
     PluginInstaller installer,
     PluginJobsService pluginJobs,
-    GitHubPluginDiscovery pluginDiscovery) : ControllerBase
+    GitHubPluginDiscovery pluginDiscovery,
+    ILogger<SourcesController> logger) : ControllerBase
 {
     // The plugin-settings namespace key is the descriptor id's last segment
     // ("mediapager.search.tmdb" → "tmdb") — the same convention PluginSettingsService uses.
@@ -613,11 +614,11 @@ public sealed class SourcesController(
     // the SPA polls, same as POST /plugins/jobs {key}.
     [HttpPost("/plugins/{key}/enable")]
     [Authorize(Policy = "SuperAdmin")]
-    public IActionResult EnablePlugin(string key)
+    public async Task<IActionResult> EnablePlugin(string key, CancellationToken cancellationToken)
     {
         try
         {
-            var outcome = pluginJobs.Enable(key);
+            var outcome = await pluginJobs.EnableAsync(key, cancellationToken);
             return outcome.JobId is not null
                 ? Accepted(new { jobId = outcome.JobId })
                 : Ok(new { message = outcome.Message });
@@ -760,9 +761,15 @@ public sealed class SourcesController(
         if (plugin is null)
             return NotFound();
 
-        var uiRoot = Path.Combine(Path.GetDirectoryName(plugin.GetType().Assembly.Location) ?? "", "ui");
+        var uiRoot = plugin is IPluginUiAssetProvider workerUi
+            ? workerUi.PluginUiDirectory
+            : Path.Combine(Path.GetDirectoryName(plugin.GetType().Assembly.Location) ?? "", "ui");
         if (!Directory.Exists(uiRoot))
+        {
+            logger.LogWarning("Custom UI folder was not found for plugin {PluginId} at {UiDirectory}.",
+                plugin.Descriptor.Id, uiRoot);
             return NotFound();
+        }
 
         var relative = string.IsNullOrWhiteSpace(path) ? "index.html" : path;
         var fullPath = Path.GetFullPath(Path.Combine(uiRoot, relative));
@@ -771,7 +778,11 @@ public sealed class SourcesController(
             !string.Equals(fullPath, Path.GetFullPath(uiRoot), StringComparison.Ordinal))
             return NotFound();
         if (!System.IO.File.Exists(fullPath))
+        {
+            logger.LogWarning("Custom UI asset was not found for plugin {PluginId} at {UiAssetPath}.",
+                plugin.Descriptor.Id, fullPath);
             return NotFound();
+        }
 
         var contentType = Path.GetExtension(fullPath).ToLowerInvariant() switch
         {
@@ -788,6 +799,11 @@ public sealed class SourcesController(
             ".woff2" => "font/woff2",
             _ => "application/octet-stream",
         };
+        Response.Headers["X-Content-Type-Options"] = "nosniff";
+        Response.Headers["Content-Security-Policy"] =
+            "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; " +
+            "img-src 'self' data: blob:; font-src 'self' data:; media-src 'self' blob:; " +
+            "connect-src 'none'; frame-src 'none'; form-action 'none'; object-src 'none'; base-uri 'none'";
         return PhysicalFile(fullPath, contentType);
     }
 

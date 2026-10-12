@@ -8,7 +8,7 @@ namespace MediaPager.App.Api.Controllers;
 // this is browse + details (seasons & episodes) for now.
 [ApiController]
 [Route("tv-shows")]
-public sealed class TvShowsController(IHttpClientFactory httpClientFactory, IPluginSettingsStore pluginSettings) : ControllerBase
+public sealed class TvShowsController(IHttpClientFactory httpClientFactory, IPluginSettingsRepository pluginSettings) : ControllerBase
 {
     // GET /tv-shows?q=&page=1 — tv/popular when no search, search/tv when searching.
     [HttpGet]
