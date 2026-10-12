@@ -10,9 +10,11 @@
   <ItemGroup>
     <ProjectReference Include="../MediaPager.App.PluginContracts/MediaPager.App.PluginContracts.csproj" />
     <ProjectReference Include="../MediaPager.App.Core/MediaPager.App.Core.csproj" />
+    <ProjectReference Include="../NoBugsGiven.Quasar.Interop/NoBugsGiven.Quasar.Interop.csproj" />
     <ProjectReference Include="../MediaPager.Plugins.Stream.Local/MediaPager.Plugins.Stream.Local.csproj" />
     <ProjectReference Include="../MediaPager.Plugins.Search.Local/MediaPager.Plugins.Search.Local.csproj" />
     <ProjectReference Include="../MediaPager.Plugins.Search.Tmdb/MediaPager.Plugins.Search.Tmdb.csproj" />
+    <ProjectReference Include="../MediaPager.Plugins.Metadata.MusicBrainz/MediaPager.Plugins.Metadata.MusicBrainz.csproj" />
     <ProjectReference Include="../MediaPager.Plugins.Subtitles.OpenSubtitles/MediaPager.Plugins.Subtitles.OpenSubtitles.csproj" />
     <ProjectReference Include="../MediaPager.Plugins.Subtitles.Subdl/MediaPager.Plugins.Subtitles.Subdl.csproj" />
     <!-- Default-installed email providers. Gmail/Office365 are official too but intentionally
@@ -43,6 +45,7 @@
          so appsettings.json stays a thin Required-by-id file. -->
     <Content Update="plugins.official.json" CopyToOutputDirectory="PreserveNewest" />
     <Content Update="plugins.community.json" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="ThirdPartyNotices/FFmpeg.md" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
 
   <!-- Official plugins ship through the same install-into-a-directory process as community
@@ -55,12 +58,15 @@
   <ItemGroup>
     <!-- Shipped (ProjectReference'd) official plugins: assembly/folder name == project name.
          Optional officials (Gmail/Office365) install on demand through the deployer. -->
-    <OfficialPluginDeploy Include="MediaPager.Plugins.Stream.Local;MediaPager.Plugins.Search.Local;MediaPager.Plugins.Search.Tmdb;MediaPager.Plugins.Subtitles.OpenSubtitles;MediaPager.Plugins.Subtitles.Subdl;MediaPager.Plugins.Email.Smtp;MediaPager.Plugins.Email.MailGun" />
+     <OfficialPluginDeploy Include="MediaPager.Plugins.Stream.Local;MediaPager.Plugins.Search.Local;MediaPager.Plugins.Search.Tmdb;MediaPager.Plugins.Metadata.MusicBrainz;MediaPager.Plugins.Subtitles.OpenSubtitles;MediaPager.Plugins.Subtitles.Subdl;MediaPager.Plugins.Email.Smtp;MediaPager.Plugins.Email.MailGun" />
   </ItemGroup>
   <Target Name="DeployOfficialPlugins" AfterTargets="Build">
     <MakeDir Directories="@(OfficialPluginDeploy->'$(MediaPagerOfficialPluginsDir)/%(Identity)')" />
     <Copy SourceFiles="@(OfficialPluginDeploy->'$(TargetDir)%(Identity).dll')"
           DestinationFiles="@(OfficialPluginDeploy->'$(MediaPagerOfficialPluginsDir)/%(Identity)/%(Identity).dll')"
+          SkipUnchangedFiles="true" />
+    <Copy SourceFiles="@(OfficialPluginDeploy->'$(MSBuildProjectDirectory)/../%(Identity)/%(Identity).manifest.json')"
+          DestinationFiles="@(OfficialPluginDeploy->'$(MediaPagerOfficialPluginsDir)/%(Identity)/%(Identity).manifest.json')"
           SkipUnchangedFiles="true" />
   </Target>
 

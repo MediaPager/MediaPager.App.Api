@@ -28,6 +28,117 @@ public sealed class CatalogItemsController(
 
     // GET /catalog-items — library entries for the catalog tabs. Filter by catalog,
     // kind, or external id (playback uses externalId to find a local copy of a TMDB movie).
+    [HttpGet("music/stats")]
+    public async Task<IActionResult> MusicStats([FromQuery] int catalogId, CancellationToken cancellationToken)
+    {
+        if (catalogId <= 0) return BadRequest(new { error = "A music catalog is required." });
+        var isMusicCatalog = await database.Catalogs.AsNoTracking()
+            .AnyAsync(catalog => catalog.Id == catalogId && catalog.CatalogType!.Slug == "music", cancellationToken);
+        if (!isMusicCatalog) return NotFound(new { error = "The music catalog was not found." });
+
+        var musicItems = database.CatalogItems.AsNoTracking().Where(item => item.CatalogId == catalogId);
+        var artists = await musicItems.CountAsync(item => item.Kind == "artist" && item.ParentId == null, cancellationToken);
+        var albums = await musicItems.CountAsync(item => item.Kind == "album", cancellationToken);
+        var tracks = await musicItems.CountAsync(item => item.Kind != "artist" && item.Kind != "album", cancellationToken);
+        var unorganizedTracks = await musicItems.CountAsync(item => item.Kind != "artist" && item.Kind != "album" && item.ParentId == null, cancellationToken);
+        var genres = await database.CatalogItemTags.AsNoTracking()
+            .Where(tag => tag.Type == "genre" && tag.CatalogItem!.CatalogId == catalogId &&
+                          tag.CatalogItem.Kind != "artist" && tag.CatalogItem.Kind != "album")
+            .GroupBy(tag => tag.Value)
+            .Select(group => new { name = group.Key, count = group.Count() })
+            .OrderByDescending(genre => genre.count)
+            .ThenBy(genre => genre.name)
+            .ToListAsync(cancellationToken);
+        var years = await musicItems.Where(item => item.Kind != "artist" && item.Kind != "album" && item.Year != null)
+            .Select(item => item.Year!.Value)
+            .Distinct()
+            .OrderByDescending(value => value)
+            .ToListAsync(cancellationToken);
+
+        return Ok(new { artists, albums, tracks, unorganizedTracks, genres, years });
+    }
+
+    [HttpGet("music")]
+    public async Task<IActionResult> MusicList(
+        [FromQuery] int catalogId,
+        [FromQuery] string level = "artist",
+        [FromQuery] int? parentId = null,
+        [FromQuery] string? queryText = null,
+        [FromQuery] string? genre = null,
+        [FromQuery] int? year = null,
+        [FromQuery] string sort = "title",
+        [FromQuery] int page = 1,
+        [FromQuery] int pageSize = 60,
+        CancellationToken cancellationToken = default)
+    {
+        if (catalogId <= 0) return BadRequest(new { error = "A music catalog is required." });
+        level = level.Trim().ToLowerInvariant();
+        if (level is not ("artist" or "album" or "track" or "unorganized"))
+            return BadRequest(new { error = "Level must be artist, album, track or unorganized." });
+        page = Math.Max(1, page);
+        pageSize = Math.Clamp(pageSize, 1, 100);
+
+        var isMusicCatalog = await database.Catalogs.AsNoTracking()
+            .AnyAsync(catalog => catalog.Id == catalogId && catalog.CatalogType!.Slug == "music", cancellationToken);
+        if (!isMusicCatalog) return NotFound(new { error = "The music catalog was not found." });
+
+        var query = database.CatalogItems.AsNoTracking()
+            .Include(item => item.Parent)
+            .Include(item => item.Catalog!)
+            .ThenInclude(catalog => catalog!.CatalogType!)
+            .ThenInclude(type => type!.MediaType!)
+            .Where(item => item.CatalogId == catalogId);
+        if (level == "unorganized")
+            query = query.Where(item => item.Kind != "artist" && item.Kind != "album" && item.ParentId == null);
+        else if (level == "track")
+            query = query.Where(item => item.Kind != "artist" && item.Kind != "album");
+        else
+            query = query.Where(item => item.Kind == level);
+        if (level == "artist") query = query.Where(item => item.ParentId == null);
+        else if (parentId is int parent) query = query.Where(item => item.ParentId == parent);
+        if (!string.IsNullOrWhiteSpace(queryText))
+        {
+            var normalizedQuery = queryText.Trim().ToLowerInvariant();
+            query = query.Where(item => item.Title.ToLower().Contains(normalizedQuery) ||
+                                        (item.Parent != null && item.Parent.Title.ToLower().Contains(normalizedQuery)) ||
+                                        (item.Parent != null && item.Parent.Parent != null && item.Parent.Parent.Title.ToLower().Contains(normalizedQuery)) ||
+                                        item.MusicArtistCredits.Any(credit => credit.ArtistCatalogItem!.Title.ToLower().Contains(normalizedQuery)));
+        }
+        if (!string.IsNullOrWhiteSpace(genre))
+        {
+            var normalizedGenre = genre.Trim().ToLowerInvariant();
+            query = query.Where(item => item.Tags.Any(tag => tag.Type == "genre" && tag.Value.ToLower() == normalizedGenre));
+        }
+        if (year is int selectedYear) query = query.Where(item => item.Year == selectedYear);
+
+        var totalItems = await query.CountAsync(cancellationToken);
+        query = sort.Trim().ToLowerInvariant() switch
+        {
+            "artist" => query.OrderBy(item => item.MusicArtistCredits
+                .Where(credit => credit.Role == "artist")
+                .OrderBy(credit => credit.Position)
+                .Select(credit => credit.ArtistCatalogItem!.Title)
+                .FirstOrDefault() ?? "")
+                .ThenBy(item => item.SortTitle ?? item.Title),
+            "album" => query.OrderBy(item => item.Parent!.Title).ThenBy(item => item.SortTitle ?? item.Title),
+            "year" => query.OrderBy(item => item.Year == null).ThenByDescending(item => item.Year).ThenBy(item => item.SortTitle ?? item.Title),
+            "recent" => query.OrderByDescending(item => item.CreatedAt).ThenBy(item => item.Id),
+            _ => query.OrderBy(item => item.SortTitle ?? item.Title).ThenBy(item => item.Id),
+        };
+        var items = await query
+            .Skip((page - 1) * pageSize)
+            .Take(pageSize)
+            .ToListAsync(cancellationToken);
+        return Ok(new
+        {
+            page,
+            pageSize,
+            totalItems,
+            totalPages = Math.Max(1, (int)Math.Ceiling(totalItems / (double)pageSize)),
+            items = await ToDtosAsync(items, cancellationToken),
+        });
+    }
+
     [HttpGet]
     public async Task<IActionResult> List(
         [FromQuery] int? catalogId,
@@ -36,6 +147,7 @@ public sealed class CatalogItemsController(
         CancellationToken cancellationToken)
     {
         var query = database.CatalogItems.AsNoTracking()
+            .Include(item => item.Parent)
             .Include(item => item.Catalog!)
             .ThenInclude(catalog => catalog!.CatalogType!)
             .ThenInclude(type => type!.MediaType!)
@@ -177,7 +289,11 @@ public sealed class CatalogItemsController(
     [Authorize(Policy = "CanEditCatalogs")]
     public async Task<IActionResult> Update(int id, UpdateCatalogItemRequest request, CancellationToken cancellationToken)
     {
-        var item = await database.CatalogItems.FirstOrDefaultAsync(entry => entry.Id == id, cancellationToken);
+        var item = await database.CatalogItems
+            .Include(entry => entry.Parent)
+            .Include(entry => entry.Catalog!)
+            .ThenInclude(catalog => catalog!.CatalogType)
+            .FirstOrDefaultAsync(entry => entry.Id == id, cancellationToken);
         if (item is null) return NotFound();
 
         if (request.Title is not null)
@@ -215,12 +331,149 @@ public sealed class CatalogItemsController(
             if (request.Year is < 1800 or > 2200) return BadRequest(new { error = "Year must be between 1800 and 2200." });
             item.Year = request.Year;
         }
+        if (request.Artist is not null || request.Album is not null)
+        {
+            if (!string.Equals(item.Catalog?.CatalogType?.Slug, "music", StringComparison.OrdinalIgnoreCase))
+                return BadRequest(new { error = "Artist and album fields are only available for music catalog items." });
+            if (item.Kind is "artist" or "album")
+                return BadRequest(new { error = "Edit artist and album entries from a track's music metadata." });
+            await UpdateMusicOrganizationAsync(item, request.Artist, request.Album, cancellationToken);
+        }
+        if (request.Year is not null && item.Parent is { Kind: "album" } release)
+            release.Year = request.Year;
         item.ModifiedAt = DateTimeOffset.UtcNow;
         await database.SaveChangesAsync(cancellationToken);
 
         var updated = await LoadAsync(id, cancellationToken);
         return Ok(await ToDtoAsync(updated!, cancellationToken));
     }
+
+    private async Task UpdateMusicOrganizationAsync(
+        CatalogItem track,
+        string? artistValue,
+        string? albumValue,
+        CancellationToken cancellationToken)
+    {
+        var artistNames = artistValue is null
+            ? await MusicCreditNamesAsync(track.Id, "artist", cancellationToken)
+            : ParseMusicNames(artistValue);
+        if (artistValue is not null)
+            await ReplaceMusicCreditsAsync(track, "artist", artistNames, cancellationToken);
+
+        var currentAlbum = track.Parent is { Kind: "album" } ? track.Parent : null;
+        var albumTitle = albumValue is null
+            ? currentAlbum?.Title
+            : string.IsNullOrWhiteSpace(albumValue) ? null : albumValue.Trim();
+        if (string.IsNullOrWhiteSpace(albumTitle))
+        {
+            track.Kind = "track";
+            track.Parent = null;
+            track.ParentId = null;
+            return;
+        }
+
+        var albumArtistNames = currentAlbum is null
+            ? []
+            : await MusicCreditNamesAsync(currentAlbum.Id, "album-artist", cancellationToken);
+        var primaryAlbumArtistName = albumArtistNames.FirstOrDefault()
+            ?? artistNames.FirstOrDefault()
+            ?? "Unknown Artist";
+        var catalogId = track.CatalogId;
+        var artist = await FindOrCreateMusicArtistAsync(track, primaryAlbumArtistName, cancellationToken);
+        var album = await database.CatalogItems.FirstOrDefaultAsync(item =>
+            item.CatalogId == catalogId && item.Kind == "album" && item.ParentId == artist.Id &&
+            item.Title.ToLower() == albumTitle.ToLower(), cancellationToken);
+        if (album is null)
+        {
+            album = new CatalogItem
+            {
+                CatalogId = catalogId,
+                MediaTypeId = track.MediaTypeId,
+                ParentId = artist.Id,
+                Title = albumTitle,
+                SortTitle = albumTitle,
+                Kind = "album",
+                Year = track.Year,
+                ImageUrl = track.ImageUrl,
+            };
+            database.CatalogItems.Add(album);
+            await database.SaveChangesAsync(cancellationToken);
+            await ReplaceMusicCreditsAsync(album, "album-artist", [primaryAlbumArtistName], cancellationToken);
+        }
+
+        track.Kind = "track";
+        track.Parent = album;
+        track.ParentId = album.Id;
+    }
+
+    private async Task<CatalogItem> FindOrCreateMusicArtistAsync(
+        CatalogItem item,
+        string name,
+        CancellationToken cancellationToken)
+    {
+        name = string.IsNullOrWhiteSpace(name) ? "Unknown Artist" : name.Trim();
+        var artist = await database.CatalogItems.FirstOrDefaultAsync(candidate =>
+            candidate.CatalogId == item.CatalogId && candidate.Kind == "artist" && candidate.ParentId == null &&
+            candidate.Title.ToLower() == name.ToLower(), cancellationToken);
+        if (artist is not null) return artist;
+
+        artist = new CatalogItem
+        {
+            CatalogId = item.CatalogId,
+            MediaTypeId = item.MediaTypeId,
+            Title = name,
+            SortTitle = name,
+            Kind = "artist",
+        };
+        database.CatalogItems.Add(artist);
+        await database.SaveChangesAsync(cancellationToken);
+        return artist;
+    }
+
+    private async Task ReplaceMusicCreditsAsync(
+        CatalogItem item,
+        string role,
+        IReadOnlyList<string> names,
+        CancellationToken cancellationToken)
+    {
+        var existing = await database.CatalogItemMusicArtistCredits
+            .Where(credit => credit.CatalogItemId == item.Id && credit.Role == role)
+            .ToListAsync(cancellationToken);
+        if (existing.Count > 0)
+        {
+            database.CatalogItemMusicArtistCredits.RemoveRange(existing);
+            await database.SaveChangesAsync(cancellationToken);
+        }
+
+        var position = 0;
+        foreach (var name in names)
+        {
+            var artist = await FindOrCreateMusicArtistAsync(item, name, cancellationToken);
+            database.CatalogItemMusicArtistCredits.Add(new CatalogItemMusicArtistCredit
+            {
+                CatalogItemId = item.Id,
+                ArtistCatalogItemId = artist.Id,
+                Role = role,
+                Position = position++,
+            });
+        }
+        if (position > 0) await database.SaveChangesAsync(cancellationToken);
+    }
+
+    private async Task<IReadOnlyList<string>> MusicCreditNamesAsync(
+        int itemId,
+        string role,
+        CancellationToken cancellationToken) =>
+        await database.CatalogItemMusicArtistCredits.AsNoTracking()
+            .Where(credit => credit.CatalogItemId == itemId && credit.Role == role)
+            .OrderBy(credit => credit.Position)
+            .Select(credit => credit.ArtistCatalogItem!.Title)
+            .ToListAsync(cancellationToken);
+
+    private static IReadOnlyList<string> ParseMusicNames(string value) =>
+        value.Split(';', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
 
     // POST /catalog-items/{id}/artwork?kind=poster|backdrop — store a custom image on the
     // MediaPager data disk and point the item's poster/backdrop at it.
@@ -455,6 +708,7 @@ public sealed class CatalogItemsController(
     private async Task<CatalogItem?> LoadAsync(int id, CancellationToken cancellationToken) =>
         await database.CatalogItems.AsNoTracking()
             .Include(item => item.Tags)
+            .Include(item => item.Parent)
             .Include(item => item.Catalog!)
             .ThenInclude(catalog => catalog!.CatalogType!)
             .ThenInclude(type => type!.MediaType!)
@@ -471,7 +725,20 @@ public sealed class CatalogItemsController(
         var ratings = await database.CatalogItemRatings.AsNoTracking()
             .Where(rating => ids.Contains(rating.CatalogItemId) && rating.UserId == userId)
             .ToListAsync(cancellationToken);
-        return items.Select(item => ToDto(item, tags, ratings)).ToList();
+        var credits = await database.CatalogItemMusicArtistCredits.AsNoTracking()
+            .Include(credit => credit.ArtistCatalogItem)
+            .Where(credit => ids.Contains(credit.CatalogItemId))
+            .OrderBy(credit => credit.Position)
+            .ToListAsync(cancellationToken);
+        var creditsByItem = credits.GroupBy(credit => credit.CatalogItemId)
+            .ToDictionary(group => group.Key, group => group.Select(credit => new MusicArtistCreditResponse(
+                credit.ArtistCatalogItemId,
+                credit.ArtistCatalogItem!.Title,
+                credit.ArtistCatalogItem.MusicBrainzId,
+                credit.Role,
+                credit.Position)).ToList());
+        return items.Select(item => ToDto(item, tags, ratings,
+            creditsByItem.GetValueOrDefault(item.Id))).ToList();
     }
 
     private async Task<object> ToDtoAsync(CatalogItem item, CancellationToken cancellationToken)
@@ -480,7 +747,11 @@ public sealed class CatalogItemsController(
         return dto[0];
     }
 
-    private static object ToDto(CatalogItem item, List<CatalogItemTag>? tags = null, List<CatalogItemRating>? ratings = null) => new
+    private static object ToDto(
+        CatalogItem item,
+        List<CatalogItemTag>? tags = null,
+        List<CatalogItemRating>? ratings = null,
+        List<MusicArtistCreditResponse>? musicCredits = null) => new
     {
         item.Id,
         item.CatalogId,
@@ -489,6 +760,7 @@ public sealed class CatalogItemsController(
         CatalogTypeSlug = item.Catalog?.CatalogType?.Slug,
         MediaTypeSlug = item.Catalog?.CatalogType?.MediaType?.Slug,
         item.ParentId,
+        ParentTitle = item.Parent?.Title,
         item.Title,
         item.SortTitle,
         item.Kind,
@@ -506,11 +778,25 @@ public sealed class CatalogItemsController(
         item.ImageUrl,
         item.BackdropUrl,
         item.ExternalId,
+        item.MusicBrainzId,
+        item.Isrc,
+        item.TrackNumber,
+        item.TrackCount,
+        item.DiscNumber,
+        item.DiscCount,
+        MusicArtistCredits = musicCredits ?? [],
         Tags = (tags ?? item.Tags).Select(tag => new { tag.Type, tag.Value }).OrderBy(tag => tag.Type).ThenBy(tag => tag.Value),
         UserRating = ratings?.FirstOrDefault(rating => rating.CatalogItemId == item.Id)?.Rating,
         item.CreatedAt,
         item.ModifiedAt,
     };
+
+    private sealed record MusicArtistCreditResponse(
+        int ArtistCatalogItemId,
+        string Name,
+        string? MusicBrainzId,
+        string Role,
+        int Position);
 
     private static string? NormalizeUrl(string value)
     {
@@ -596,10 +882,12 @@ public sealed class CatalogItemsController(
         ".ts" => "video/mp2t",
         ".mpeg" or ".mpg" => "video/mpeg",
         ".mp3" => "audio/mpeg",
-        ".m4a" or ".aac" => "audio/mp4",
+        ".m4a" or ".m4b" => "audio/mp4",
+        ".aac" => "audio/aac",
         ".flac" => "audio/flac",
         ".wav" => "audio/wav",
-        ".ogg" => "audio/ogg",
+        ".ogg" or ".oga" or ".opus" => "audio/ogg",
+        ".wma" => "audio/x-ms-wma",
         _ => "application/octet-stream",
     };
 
@@ -624,7 +912,9 @@ public sealed record UpdateCatalogItemRequest(
     string? OriginalTitle = null,
     string? OriginalAvailableAt = null,
     string? ContentRating = null,
-    double? Rating = null);
+    double? Rating = null,
+    string? Artist = null,
+    string? Album = null);
 
 public sealed record ArtworkUrlRequest(string? Url);
 

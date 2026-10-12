@@ -36,7 +36,9 @@ public sealed class PluginJobsService(
     PluginRegistry registry,
     PluginDeployer deployer,
     IConfiguration configuration,
-    IWebHostEnvironment environment)
+    IWebHostEnvironment environment,
+    PlaywrightBrowserInstaller browserInstaller,
+    ManagedToolsBootstrapState toolBootstrapState)
 {
     private readonly ConcurrentDictionary<string, PluginJobState> _jobs = new();
     // Serialized writes to the JSON config files (appsettings.json / plugins.community.json).
@@ -207,7 +209,7 @@ public sealed class PluginJobsService(
     /// <c>.disabled</c> marker, official is added to Required:Official, both reload in
     /// place — no network, no rebuild. When nothing is deployed yet it returns a jobId the
     /// SPA polls (the same deploy path StartByKey uses).</summary>
-    public PluginEnableOutcome Enable(string key)
+    public async Task<PluginEnableOutcome> EnableAsync(string key, CancellationToken cancellationToken = default)
     {
         var official = PluginCatalog.ReadOfficial(configuration).FirstOrDefault(entry =>
             string.Equals(entry.Id, key, StringComparison.OrdinalIgnoreCase));
@@ -233,6 +235,9 @@ public sealed class PluginJobsService(
 
         var folder = Path.Combine(directory, assembly);
         var manifest = ReadInstalledManifest(folder, assembly);
+        if (string.Equals(manifest?.Id ?? key, "mediapager.stream.vidsrc", StringComparison.OrdinalIgnoreCase) &&
+            !browserInstaller.IsChromiumInstalled())
+            return new PluginEnableOutcome(StartByKey(key), null);
         if ((manifest?.Requires ?? []).Any(id => registry.GetPlugin(id) is null))
             return new PluginEnableOutcome(StartByKey(key), null);
 
@@ -240,12 +245,15 @@ public sealed class PluginJobsService(
         if (File.Exists(marker))
             File.Delete(marker);
 
+        await EnsurePluginToolsAsync(manifest?.Id ?? key, cancellationToken);
+
         var reservedIds = new HashSet<string>(
             PluginCatalog.ReadOfficial(configuration).Select(entry => entry.Id),
             StringComparer.OrdinalIgnoreCase);
         foreach (var loaded in registry.Plugins)
             reservedIds.Add(loaded.Descriptor.Id);
-        var loadedPlugins = PluginLoader.LoadFolder(services, folder, official is not null, reservedIds);
+        var loadedPlugins = PluginLoader.LoadFolder(
+            services, folder, official is not null, reservedIds, pluginId: manifest?.Id ?? key);
         if (loadedPlugins.Count == 0)
             throw new InvalidOperationException(
                 "The plugin could not be loaded — its id may collide with an official plugin, "
@@ -260,6 +268,15 @@ public sealed class PluginJobsService(
                 registry.Add(plugin, community: official is null);
         }
         return new PluginEnableOutcome(null, $"{loadedPlugins[0].Descriptor.Name} is active.");
+    }
+
+    private async Task EnsurePluginToolsAsync(string? pluginId, CancellationToken cancellationToken)
+    {
+        if (string.Equals(pluginId, "mediapager.stream.vidsrc", StringComparison.OrdinalIgnoreCase))
+        {
+            await toolBootstrapState.WaitAsync(cancellationToken);
+            await browserInstaller.EnsureChromiumInstalledAsync(cancellationToken);
+        }
     }
 
     /// <summary>Add or remove an official id in Plugins:Required:Official (appsettings.json),
@@ -335,6 +352,11 @@ public sealed class PluginJobsService(
             if (manifest is not null)
                 await EnsureRequiredPluginsAsync(manifest, job, new HashSet<string>([manifest.Id], StringComparer.OrdinalIgnoreCase));
 
+            if (string.Equals(manifest?.Id ?? plan.Id, "mediapager.stream.vidsrc", StringComparison.OrdinalIgnoreCase))
+            {
+                job.Update(88, "tools", "Provisioning the pinned browser runtime into the managed tool cache…");
+                await EnsurePluginToolsAsync(manifest?.Id ?? plan.Id, CancellationToken.None);
+            }
             job.Update(92, "loading", "Verifying the plugin (load + id checks)…");
             var reservedIds = new HashSet<string>(
                 PluginCatalog.ReadOfficial(configuration).Select(entry => entry.Id),
@@ -352,7 +374,8 @@ public sealed class PluginJobsService(
                     $"Missing required plugin(s): {string.Join(", ", missingRequirements)}. Install those plugins first.");
             }
 
-            var loadedPlugins = PluginLoader.LoadFolder(services, folder, plan.Official, reservedIds);
+            var loadedPlugins = PluginLoader.LoadFolder(
+                services, folder, plan.Official, reservedIds, pluginId: manifest?.Id ?? plan.Id);
             if (loadedPlugins.Count == 0)
             {
                 if (plan.Custom)
@@ -373,6 +396,13 @@ public sealed class PluginJobsService(
                 {
                     // Roll the freshly deployed folder back so a retry re-validates from
                     // scratch instead of slipping through the already-deployed fast path.
+                    foreach (var plugin in loadedPlugins)
+                    {
+                        if (plugin is IDisposable disposable)
+                        {
+                            try { disposable.Dispose(); } catch { }
+                        }
+                    }
                     TryDeleteDirectory(folder);
                     throw;
                 }
@@ -489,7 +519,8 @@ public sealed class PluginJobsService(
             StringComparer.OrdinalIgnoreCase);
         foreach (var loaded in registry.Plugins)
             reservedIds.Add(loaded.Descriptor.Id);
-        var loadedPlugins = PluginLoader.LoadFolder(services, folder, official is not null, reservedIds);
+        var loadedPlugins = PluginLoader.LoadFolder(
+            services, folder, official is not null, reservedIds, pluginId: manifest.Id);
         if (loadedPlugins.Count == 0)
             throw new InvalidOperationException($"Required plugin '{pluginId}' could not be loaded.");
 

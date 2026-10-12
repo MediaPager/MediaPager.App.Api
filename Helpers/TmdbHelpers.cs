@@ -5,10 +5,10 @@ public static class TmdbHelpers
 {
     // Host-side reads of the TMDB plugin's settings (plugins.tmdb.*). The plugin itself
     // reads the same store; config (plugins:tmdb:*) is the fallback.
-    public static async Task<string?> GetApiKeyAsync(IPluginSettingsStore settings, CancellationToken ct) =>
+    public static async Task<string?> GetApiKeyAsync(IPluginSettingsRepository settings, CancellationToken ct) =>
         (await settings.GetAsync(PluginKeys.Tmdb, "apiKey", ct))?.Trim();
 
-    public static async Task<string> GetImageBaseAsync(IPluginSettingsStore settings, CancellationToken ct) =>
+    public static async Task<string> GetImageBaseAsync(IPluginSettingsRepository settings, CancellationToken ct) =>
         (await settings.GetAsync(PluginKeys.Tmdb, "imageBase", ct) ?? "https://image.tmdb.org/t/p/w500").TrimEnd('/');
 
     // Build a full image URL from a TMDB image path, passing through absolute URLs.
