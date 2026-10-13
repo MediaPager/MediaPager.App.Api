@@ -2,13 +2,14 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Security.Cryptography;
 using Microsoft.AspNetCore.DataProtection;
+using Microsoft.Extensions.Configuration;
 
 namespace MediaPager.App.Api.Services;
 
 /// <summary>
-/// The runtime database is authoritative for Settings:Db, but its provider/location must be
-/// known before the database can be opened. This data-volume snapshot carries only non-secret
-/// locator fields across restarts; passwords remain in the deployment secret environment.
+/// Database connection details are configuration-only, but their provider/location must be
+/// known before the database can be opened. This data-volume snapshot lives outside the auth
+/// database and Settings UI; its password field is protected with Data Protection.
 /// </summary>
 public static class DatabaseBootstrapFile
 {
@@ -27,20 +28,25 @@ public static class DatabaseBootstrapFile
     public static string PathFor(StorageLayout layout) =>
         Path.Combine(layout.ConfigDirectory, "database-bootstrap.json");
 
-    public static void Write(string path, IReadOnlyDictionary<string, string> settings, string? protectedPassword)
+    public static void Write(string path, IConfiguration configuration, IDataProtectionProvider protection)
     {
         var database = new JsonObject();
-        var provider = settings.GetValueOrDefault(RuntimeSettingKeys.DatabaseProvider, "Sqlite");
+        var provider = SettingsConfigurationKeys.ReadConfiguredValue(configuration, RuntimeSettingKeys.DatabaseProvider) ?? "Sqlite";
         foreach (var key in Keys)
         {
             if (key == RuntimeSettingKeys.DatabasePath &&
                 !string.Equals(provider, "Sqlite", StringComparison.OrdinalIgnoreCase))
                 continue;
-            if (settings.TryGetValue(key, out var value) && !string.IsNullOrWhiteSpace(value))
+            var value = SettingsConfigurationKeys.ReadConfiguredValue(configuration, key);
+            if (!string.IsNullOrWhiteSpace(value))
                 database[key[(key.LastIndexOf(':') + 1)..]] = JsonValue.Create(value);
         }
-        if (!string.IsNullOrWhiteSpace(protectedPassword))
-            database["PasswordProtected"] = JsonValue.Create(protectedPassword);
+        var password = SettingsConfigurationKeys.ReadConfiguredValue(configuration, RuntimeSettingKeys.DatabasePassword);
+        if (!string.IsNullOrWhiteSpace(password))
+        {
+            var protector = protection.CreateProtector("MediaPager.Settings.Db.Password.v1");
+            database["PasswordProtected"] = JsonValue.Create("enc:v1:" + protector.Protect(password));
+        }
         var root = new JsonObject { ["Settings"] = new JsonObject { ["Db"] = database } };
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
         var temporary = $"{path}.{Guid.NewGuid():N}.tmp";

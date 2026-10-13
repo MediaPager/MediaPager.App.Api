@@ -75,16 +75,17 @@ dotnet user-secrets set "Auth:SigningKey" "$(openssl rand -base64 48)" --project
   `Settings:Plugins:mediapager.email.<provider>`. Schema-marked secrets are protected at rest
   and never returned to the UI. Legacy `plugins.<short-key>.*` values migrate on first use.
 
-- **Database:** Settings use `Settings:Db` and are initialized from appsettings/environment
-  on first boot. SQLite is the default (`/data/db/mediapager-auth.db` in Docker;
+- **Database:** Connection details are bootstrap configuration from appsettings/environment,
+  not runtime settings; they are not stored in the auth database or exposed in Settings.
+  The data-volume bootstrap file keeps a protected restart snapshot outside the database.
+  SQLite is the default (`/data/db/mediapager-auth.db` in Docker;
   `%APPDATA%/MediaPager/db/mediapager.db` on Windows and `~/.MediaPager/db/mediapager.db`
   on macOS/Linux). Use `MEDIAPAGER_Settings__Db__Provider=PostgreSQL` and set the PostgreSQL
   host, catalog, user, and password to use PostgreSQL.
   Each provider has its own EF migration set for the same `AuthDbContext`; pending migrations
-  apply automatically at startup. Database settings are persisted in the runtime settings DB;
-  provider changes select a different database and do not copy rows between databases. Legacy
-  `Database:Provider`, `ConnectionStrings:AuthDatabase`, `MEDIAPAGER_DB_PATH`, and
-  `Auth:DatabasePath` are accepted as bootstrap aliases.
+  apply automatically at startup. Changing providers selects a different database and does not
+  copy rows between databases. Legacy `Database:Provider`, `ConnectionStrings:AuthDatabase`,
+  `MEDIAPAGER_DB_PATH`, and `Auth:DatabasePath` are accepted as bootstrap aliases.
 - **Initial account:** `MEDIAPAGER_SEED_USER` sets the first super-admin email/login and
   `MEDIAPAGER_SEED_PASS` optionally supplies its initial password. These apply only when
   the first account is created.
