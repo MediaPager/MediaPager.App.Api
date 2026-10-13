@@ -36,7 +36,7 @@ public sealed class PluginJobsService(
     PluginRegistry registry,
     PluginDeployer deployer,
     IConfiguration configuration,
-    IWebHostEnvironment environment,
+    StorageLayout storageLayout,
     PlaywrightBrowserInstaller browserInstaller,
     ManagedToolsBootstrapState toolBootstrapState)
 {
@@ -230,10 +230,15 @@ public sealed class PluginJobsService(
         var directory = official is not null
             ? PluginDirectories.Official(configuration)
             : PluginDirectories.Community(configuration);
-        if (!File.Exists(Path.Combine(directory, assembly, $"{assembly}.dll")))
+        var folder = Path.Combine(directory, assembly);
+        if (official is not null && !File.Exists(Path.Combine(folder, $"{assembly}.dll")))
+        {
+            var bundledFolder = Path.Combine(PluginDirectories.BundledOfficial(configuration), assembly);
+            if (File.Exists(Path.Combine(bundledFolder, $"{assembly}.dll"))) folder = bundledFolder;
+        }
+        if (!File.Exists(Path.Combine(folder, $"{assembly}.dll")))
             return new PluginEnableOutcome(StartByKey(key), null);
 
-        var folder = Path.Combine(directory, assembly);
         var manifest = ReadInstalledManifest(folder, assembly);
         if (manifest?.HostCapabilities?.Contains(PluginHostCapabilityNames.BrowserAutomation) == true &&
             !browserInstaller.IsChromiumInstalled())
@@ -282,7 +287,7 @@ public sealed class PluginJobsService(
     /// <summary>Add or remove an official id in Plugins:Required:Official (appsettings.json),
     /// then reload configuration so the checklist and catalog read see it immediately.</summary>
     public void SetOfficialRequired(string id, bool required)
-        => EditJsonFile("appsettings.json", AppSettingsPath(), "Plugins", "Required", "Official", array =>
+        => EditJsonFile("appsettings.json", AppSettingsPath(), "Settings", "Plugins", "Required", array =>
         {
             var index = IndexOf(array, id);
             if (required && index < 0) array.Add(id);
@@ -291,7 +296,7 @@ public sealed class PluginJobsService(
 
     private string AppSettingsPath()
     {
-        var path = Path.Combine(environment.ContentRootPath, "appsettings.json");
+        var path = Path.Combine(storageLayout.ConfigDirectory, "appsettings.json");
         if (!File.Exists(path))
             throw new InvalidOperationException($"Could not find appsettings.json at {path}.");
         return path;
@@ -558,7 +563,7 @@ public sealed class PluginJobsService(
         string assembly,
         bool discoverable = true)
     {
-        var path = Path.Combine(AppContext.BaseDirectory, "plugins.community.json");
+        var path = Path.Combine(storageLayout.ConfigDirectory, "plugins.community.json");
         EditJsonFile("plugins.community.json", path, "Plugins", "List", "Community", array =>
         {
             foreach (var node in array)

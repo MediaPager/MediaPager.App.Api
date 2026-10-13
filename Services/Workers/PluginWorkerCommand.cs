@@ -91,6 +91,7 @@ internal static class PluginWorkerCommand
             var schema = plugins[0] as IPluginSettingsSchema;
             var actionProvider = plugins[0] as IPluginActions;
             var navigation = plugins[0] as IPluginNavigation;
+            var scopeSchema = plugins[0] as IPluginScopeSchema;
             if (stream is null && actionProvider is null)
                 throw new InvalidOperationException($"Worker '{pluginId}' does not expose a supported capability.");
 
@@ -114,7 +115,8 @@ internal static class PluginWorkerCommand
                 schema?.Settings.ToArray() ?? [],
                 actions,
                 navigation?.SettingsNav,
-                navigation?.MainNav.ToArray() ?? []);
+                navigation?.MainNav.ToArray() ?? [],
+                scopeSchema?.Scopes.ToArray() ?? []);
             await host.SendAsync(new PluginWorkerMessage(
                 "ready", "ready", Result: PluginWorkerJson.ToElement(description)));
             Console.Error.WriteLine($"[plugin-worker:{pluginId}] sent worker ready message.");

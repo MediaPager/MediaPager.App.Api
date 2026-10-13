@@ -3,6 +3,7 @@ using System.Security.Cryptography;
 using System.Text;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
@@ -36,24 +37,91 @@ if (ManagedPluginBuildSdkCommand.IsBootstrapMode(args))
 }
 
 var builder = WebApplication.CreateBuilder(args);
-// Plugin metadata lists, extracted so appsettings.json stays a thin Required-by-id file.
+var sourceAppSettingsPath = Path.Combine(builder.Environment.ContentRootPath, "appsettings.json");
+if (!File.Exists(sourceAppSettingsPath))
+    sourceAppSettingsPath = Path.Combine(AppContext.BaseDirectory, "appsettings.json");
+if (File.Exists(sourceAppSettingsPath))
+    builder.Configuration.AddJsonFile(sourceAppSettingsPath, optional: false, reloadOnChange: false);
+// Load the environment prefix before resolving the persistent data root. Runtime-owned
+// configuration copies live on the data volume, not in the application image.
+builder.Configuration.AddEnvironmentVariables(prefix: "MEDIAPAGER_");
+var bootstrapStorageLayout = new StorageLayout(builder.Configuration);
+var bootstrapDataProtectionProvider = DataProtectionProvider.Create(
+    new DirectoryInfo(bootstrapStorageLayout.DataProtectionKeysDirectory),
+    dataProtection => dataProtection.SetApplicationName("MediaPager"));
+Directory.CreateDirectory(bootstrapStorageLayout.ConfigDirectory);
+var runtimeAppSettingsPath = Path.Combine(bootstrapStorageLayout.ConfigDirectory, "appsettings.json");
+if (!File.Exists(runtimeAppSettingsPath))
+    File.Copy(sourceAppSettingsPath, runtimeAppSettingsPath);
+MigrateLegacyPluginSettings(runtimeAppSettingsPath);
+var runtimeCommunityPluginsPath = Path.Combine(bootstrapStorageLayout.ConfigDirectory, "plugins.community.json");
+if (!File.Exists(runtimeCommunityPluginsPath))
+{
+    var bundledCommunityList = Path.Combine(AppContext.BaseDirectory, "plugins.community.json");
+    if (File.Exists(bundledCommunityList)) File.Copy(bundledCommunityList, runtimeCommunityPluginsPath);
+    else await File.WriteAllTextAsync(runtimeCommunityPluginsPath, "{\"Plugins\":{\"List\":{\"Community\":[]}}}");
+}
+// Mutable values are overlays on the image defaults; prefixed environment values are
+// added again afterward and therefore remain deployment overrides.
+builder.Configuration.AddJsonFile(runtimeAppSettingsPath, optional: false, reloadOnChange: true);
+builder.Configuration.AddJsonFile(runtimeCommunityPluginsPath, optional: false, reloadOnChange: true);
+var databaseBootstrapPath = DatabaseBootstrapFile.PathFor(bootstrapStorageLayout);
+builder.Configuration.AddJsonFile(databaseBootstrapPath, optional: true, reloadOnChange: false);
+if (File.Exists(databaseBootstrapPath) && DatabaseBootstrapFile.ReadProtectedPassword(databaseBootstrapPath, bootstrapDataProtectionProvider) is { } bootPassword)
+    builder.Configuration.AddInMemoryCollection(new Dictionary<string, string?>
+    {
+        [SettingsConfigurationKeys.DbPassword] = bootPassword,
+    });
 builder.Configuration.AddJsonFile(Path.Combine(AppContext.BaseDirectory, "plugins.official.json"), optional: false, reloadOnChange: false);
-builder.Configuration.AddJsonFile(Path.Combine(AppContext.BaseDirectory, "plugins.community.json"), optional: true, reloadOnChange: false);
 builder.Configuration.AddEnvironmentVariables(prefix: "MEDIAPAGER_");
 
-var databaseProvider = (builder.Configuration["Database:Provider"] ?? "Sqlite").Trim().ToLowerInvariant();
-var configuredDatabasePath = Environment.GetEnvironmentVariable("MEDIAPAGER_DB_PATH");
-if (string.IsNullOrWhiteSpace(configuredDatabasePath))
-    configuredDatabasePath = builder.Configuration["Auth:DatabasePath"];
-var configuredConnectionString = builder.Configuration.GetConnectionString("AuthDatabase");
-var windowsAppData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
-if (string.IsNullOrWhiteSpace(windowsAppData))
-    windowsAppData = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "AppData", "Roaming");
-var defaultDatabaseDirectory = OperatingSystem.IsWindows()
-    ? Path.Combine(windowsAppData, "MediaPager", "db")
-    : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".MediaPager", "db");
-var defaultDataDirectory = Path.GetDirectoryName(defaultDatabaseDirectory)!;
-string persistentDataDirectory;
+var storageLayout = new StorageLayout(builder.Configuration);
+var scopeSecurityPathSetting = SettingsConfigurationKeys.ReadConfiguredValue(
+    builder.Configuration, SettingsConfigurationKeys.AppScopeSecurityPath);
+var scopeSecurityPath = storageLayout.Resolve(scopeSecurityPathSetting, Path.Combine("config", "scope-security.json"));
+if (!File.Exists(scopeSecurityPath))
+{
+    var bundledScopeSecurityPath = Path.Combine(AppContext.BaseDirectory, "scope-security.json");
+    if (!File.Exists(bundledScopeSecurityPath))
+        throw new FileNotFoundException("The bundled scope-security catalog is missing.", bundledScopeSecurityPath);
+    Directory.CreateDirectory(Path.GetDirectoryName(scopeSecurityPath)!);
+    File.Copy(bundledScopeSecurityPath, scopeSecurityPath);
+}
+var scopeSecurityCatalog = ScopeSecurityCatalog.Load(scopeSecurityPath);
+var databaseProvider = (SettingsConfigurationKeys.ReadConfiguredValue(builder.Configuration, SettingsConfigurationKeys.DbProvider) ?? "Sqlite")
+    .Trim().ToLowerInvariant();
+var configuredDatabasePath = SettingsConfigurationKeys.ReadEnvironmentValue(SettingsConfigurationKeys.DbPath)
+    ?? builder.Configuration[SettingsConfigurationKeys.DbPath]
+    ?? builder.Configuration["Auth:DatabasePath"];
+var configuredConnectionString = builder.Configuration["Settings:Db:ConnectionString"];
+if (string.IsNullOrWhiteSpace(configuredConnectionString))
+    configuredConnectionString = Environment.GetEnvironmentVariable("MEDIAPAGER_ConnectionStrings__AuthDatabase");
+if (string.IsNullOrWhiteSpace(configuredConnectionString))
+{
+    var configuredDbHost = SettingsConfigurationKeys.ReadConfiguredValue(builder.Configuration, SettingsConfigurationKeys.DbHost);
+    if (!string.IsNullOrWhiteSpace(configuredDbHost))
+    {
+        var postgres = new Npgsql.NpgsqlConnectionStringBuilder
+        {
+            Host = configuredDbHost,
+            Port = int.TryParse(SettingsConfigurationKeys.ReadConfiguredValue(builder.Configuration, SettingsConfigurationKeys.DbPort), out var port) ? port : 5432,
+            Database = SettingsConfigurationKeys.ReadConfiguredValue(builder.Configuration, SettingsConfigurationKeys.DbCatalog) ?? "mediapager",
+            Username = SettingsConfigurationKeys.ReadConfiguredValue(builder.Configuration, SettingsConfigurationKeys.DbUser) ?? "mediapager",
+            Password = SettingsConfigurationKeys.ReadConfiguredValue(builder.Configuration, SettingsConfigurationKeys.DbPassword) ?? "",
+            Timeout = int.TryParse(SettingsConfigurationKeys.ReadConfiguredValue(builder.Configuration, SettingsConfigurationKeys.DbConnectionTimeout), out var timeout) ? timeout : 15,
+        };
+        var configuredSslMode = SettingsConfigurationKeys.ReadConfiguredValue(builder.Configuration, SettingsConfigurationKeys.DbSslMode);
+        if (!string.IsNullOrWhiteSpace(configuredSslMode) && Enum.TryParse<Npgsql.SslMode>(configuredSslMode, true, out var parsedSslMode))
+            postgres.SslMode = parsedSslMode;
+        configuredConnectionString = postgres.ConnectionString;
+    }
+    else
+    {
+        configuredConnectionString = builder.Configuration.GetConnectionString("AuthDatabase");
+    }
+}
+var persistentDataDirectory = storageLayout.DataRoot;
+Directory.CreateDirectory(persistentDataDirectory);
 
 switch (databaseProvider)
 {
@@ -61,9 +129,9 @@ switch (databaseProvider)
     case "sqlite3":
         var sqliteOptions = new SqliteConnectionStringBuilder(configuredConnectionString ?? string.Empty);
         if (!string.IsNullOrWhiteSpace(configuredDatabasePath))
-            sqliteOptions.DataSource = configuredDatabasePath;
+            sqliteOptions.DataSource = storageLayout.Resolve(configuredDatabasePath, Path.Combine("db", "mediapager-auth.db"));
         else if (string.IsNullOrWhiteSpace(sqliteOptions.DataSource))
-            sqliteOptions.DataSource = Path.Combine(defaultDatabaseDirectory, "mediapager.db");
+            sqliteOptions.DataSource = storageLayout.DatabasePath;
 
         var sqliteIsInMemory = sqliteOptions.Mode == SqliteOpenMode.Memory || sqliteOptions.DataSource == ":memory:";
         string? sqliteDatabasePath = null;
@@ -71,15 +139,13 @@ switch (databaseProvider)
         {
             sqliteDatabasePath = Path.GetFullPath(sqliteOptions.DataSource);
             sqliteOptions.DataSource = sqliteDatabasePath;
-            persistentDataDirectory = Path.GetDirectoryName(sqliteDatabasePath)
-                ?? throw new InvalidOperationException("The configured SQLite database path must include a directory.");
-            Directory.CreateDirectory(persistentDataDirectory);
-
+            Directory.CreateDirectory(Path.GetDirectoryName(sqliteDatabasePath)
+                ?? throw new InvalidOperationException("The configured SQLite database path must include a directory."));
             Console.Error.WriteLine($"Auth database provider: SQLite ({sqliteDatabasePath})");
             var legacyDatabasePaths = new[]
             {
                 Path.Combine(builder.Environment.ContentRootPath, "mediapager-auth.db"),
-                Path.Combine(defaultDatabaseDirectory, "mediapager-auth.db"),
+                Path.Combine(StorageLayout.DefaultDataRoot, "db", "mediapager-auth.db"),
             };
             foreach (var legacyDatabasePath in legacyDatabasePaths)
             {
@@ -114,8 +180,6 @@ switch (databaseProvider)
         }
         else
         {
-            persistentDataDirectory = defaultDataDirectory;
-            Directory.CreateDirectory(persistentDataDirectory);
             Console.Error.WriteLine("Auth database provider: SQLite (in-memory)");
         }
 
@@ -127,13 +191,12 @@ switch (databaseProvider)
 
     case "postgres":
     case "postgresql":
-        if (!string.IsNullOrWhiteSpace(configuredDatabasePath))
+        var legacySqlitePath = Environment.GetEnvironmentVariable("MEDIAPAGER_DB_PATH") ?? builder.Configuration["Auth:DatabasePath"];
+        if (!string.IsNullOrWhiteSpace(legacySqlitePath))
             throw new InvalidOperationException("MEDIAPAGER_DB_PATH/Auth:DatabasePath only applies to SQLite; configure ConnectionStrings:AuthDatabase for PostgreSQL.");
         if (string.IsNullOrWhiteSpace(configuredConnectionString))
-            throw new InvalidOperationException("ConnectionStrings:AuthDatabase is required when Database:Provider is PostgreSQL.");
+            throw new InvalidOperationException("Settings:Db connection details are required when the provider is PostgreSQL.");
 
-        persistentDataDirectory = defaultDataDirectory;
-        Directory.CreateDirectory(persistentDataDirectory);
         Console.Error.WriteLine("Auth database provider: PostgreSQL");
         builder.Services.AddDbContext<AuthDbContext>(options => options.UseNpgsql(
             configuredConnectionString,
@@ -144,10 +207,10 @@ switch (databaseProvider)
         throw new InvalidOperationException($"Unknown Database:Provider '{databaseProvider}'. Supported providers: Sqlite, PostgreSQL.");
 }
 
-var jwtIssuer = builder.Configuration["Auth:Issuer"] ?? "MediaPager.App.Api";
+var jwtIssuer = SettingsConfigurationKeys.ReadConfiguredValue(builder.Configuration, SettingsConfigurationKeys.AppIssuer) ?? "MediaPager.App.Api";
 var configuredSigningKey = Environment.GetEnvironmentVariable("MEDIAPAGER_EKEY");
 if (string.IsNullOrWhiteSpace(configuredSigningKey))
-    configuredSigningKey = builder.Configuration["Auth:SigningKey"];
+    configuredSigningKey = builder.Configuration["Settings:App:JwtSigningKey"] ?? builder.Configuration["Auth:SigningKey"];
 byte[] signingKeyBytes;
 if (!string.IsNullOrWhiteSpace(configuredSigningKey))
 {
@@ -158,11 +221,12 @@ if (!string.IsNullOrWhiteSpace(configuredSigningKey))
 else
 {
     // Keep tokens valid across restarts by storing a generated key in persistent app data.
-    var signingKeyPath = builder.Configuration["Auth:SigningKeyPath"];
+    var signingKeyPath = builder.Configuration["Settings:Storage:Security:JwtSigningKeyPath"]
+        ?? builder.Configuration["Auth:SigningKeyPath"];
     if (string.IsNullOrWhiteSpace(signingKeyPath))
-        signingKeyPath = Path.Combine(persistentDataDirectory, "signing.key");
+        signingKeyPath = storageLayout.JwtSigningKeyPath;
     else
-        signingKeyPath = Path.GetFullPath(signingKeyPath);
+        signingKeyPath = storageLayout.Resolve(signingKeyPath, Path.Combine("keys", "signing.key"));
     Directory.CreateDirectory(Path.GetDirectoryName(signingKeyPath)!);
     if (File.Exists(signingKeyPath))
     {
@@ -214,7 +278,8 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
                 var securityStamp = context.Principal?.FindFirstValue("security_stamp");
                 var userManager = context.HttpContext.RequestServices.GetRequiredService<UserManager<AppUser>>();
                 var user = userId is null ? null : await userManager.FindByIdAsync(userId);
-                if (user is null || !string.Equals(user.SecurityStamp, securityStamp, StringComparison.Ordinal))
+                if (user is null || !user.IsActive || user.DeletedAt is not null ||
+                    !string.Equals(user.SecurityStamp, securityStamp, StringComparison.Ordinal))
                     context.Fail("The account session is no longer valid.");
             },
         };
@@ -223,17 +288,25 @@ builder.Services.AddAuthorization(options =>
 {
     options.FallbackPolicy = new AuthorizationPolicyBuilder().RequireAuthenticatedUser().Build();
     options.AddPolicy("CanInvite", policy => policy.RequireAssertion(context =>
-        context.User.HasClaim("scope", "admin:super") || context.User.HasClaim("scope", "admin:can-invite")));
+        scopeSecurityCatalog.HasPermission(context.User.FindAll("scope").Select(claim => claim.Value), "users:invite")));
     options.AddPolicy("CanEditSettings", policy => policy.RequireAssertion(context =>
-        context.User.HasClaim("scope", "admin:super") || context.User.HasClaim("scope", "admin:settings-edit")));
+        scopeSecurityCatalog.HasPermission(context.User.FindAll("scope").Select(claim => claim.Value), "settings:edit")));
     options.AddPolicy("CanEditCatalogs", policy => policy.RequireAssertion(context =>
-        context.User.HasClaim("scope", "admin:super") || context.User.HasClaim("scope", "admin:catalogs-edit")));
+        scopeSecurityCatalog.HasPermission(context.User.FindAll("scope").Select(claim => claim.Value), "catalogs:edit")));
     options.AddPolicy("SuperAdmin", policy => policy.RequireAssertion(context =>
-        context.User.HasClaim("scope", "admin:super")));
+        context.User.FindAll("scope").Any(claim =>
+            string.Equals(ScopeSecurityCatalog.CanonicalizeLegacy(claim.Value), "admin:super", StringComparison.OrdinalIgnoreCase))));
 });
 
 builder.Services.AddScoped<EmailSender>();
 builder.Services.AddScoped<IRuntimeSettings, RuntimeSettingsService>();
+builder.Services.AddSingleton(scopeSecurityCatalog);
+builder.Services.AddScoped<GitSshPrivateKeyStore>();
+builder.Services.AddScoped<DatabasePasswordStore>();
+builder.Services.AddSingleton<IGitPrivateKeyProvider, GitSshPrivateKeyProvider>();
+builder.Services.AddSingleton<IDataProtectionProvider>(bootstrapDataProtectionProvider);
+builder.Services.AddSingleton<IPluginSettingsValueProtector, PluginSettingsValueProtector>();
+builder.Services.AddSingleton(storageLayout);
 builder.Services.AddSingleton<StreamSessionState>();
 builder.Services.AddSingleton<ArtworkStorage>();
 builder.Services.AddSingleton<LocalFileSessionState>();
@@ -299,6 +372,19 @@ await using (var scope = app.Services.CreateAsyncScope())
 {
     var database = scope.ServiceProvider.GetRequiredService<AuthDbContext>();
     await database.Database.MigrateAsync();
+    var databasePasswordStore = scope.ServiceProvider.GetRequiredService<DatabasePasswordStore>();
+    await databasePasswordStore.SeedOrMigrateAsync();
+    var runtimeSettings = scope.ServiceProvider.GetRequiredService<IRuntimeSettings>();
+    await runtimeSettings.SeedMissingFromConfigurationAsync();
+    var storedSettings = await runtimeSettings.GetAllAsync();
+    DatabaseBootstrapFile.Write(DatabaseBootstrapFile.PathFor(storageLayout), storedSettings,
+        await databasePasswordStore.GetProtectedValueAsync());
+    builder.Configuration.AddInMemoryCollection(storedSettings.ToDictionary(
+        pair => pair.Key, pair => (string?)pair.Value, StringComparer.OrdinalIgnoreCase));
+    // Deployment environment variables remain the final override over runtime DB values.
+    builder.Configuration.AddEnvironmentVariables(prefix: "MEDIAPAGER_");
+    storageLayout.Refresh();
+    ArtworkStorage.MigrateLegacyDefaultArtwork(storageLayout.DataRoot);
 
     // Seed the catalog lookup tables (idempotent — insert only what's missing).
     if (!await database.CatalogTypes.AnyAsync())
@@ -392,6 +478,7 @@ await using (var scope = app.Services.CreateAsyncScope())
 // optional officials installed on demand — and community — recognized community plugins,
 // installed on demand. appsettings keeps only which ids are Required; the metadata lists
 // live in plugins.official.json / plugins.community.json.
+var bundledOfficialDirectory = PluginDirectories.BundledOfficial(builder.Configuration);
 var officialDirectory = PluginDirectories.Official(builder.Configuration);
 var communityDirectory = PluginDirectories.Community(builder.Configuration);
 Directory.CreateDirectory(officialDirectory);
@@ -417,8 +504,15 @@ foreach (var entry in communityCatalog)
 var reservedPluginIds = new HashSet<string>(
     officialCatalog.Select(entry => entry.Id), StringComparer.OrdinalIgnoreCase);
 var officialPlugins = PluginLoader.LoadDirectory(
-    app.Services, officialDirectory, official: true, requiredIds: requiredPluginSets.Official,
-    pluginIdsByAssembly: officialPluginIdsByAssembly);
+    app.Services, bundledOfficialDirectory, official: true, requiredIds: requiredPluginSets.Official,
+    pluginIdsByAssembly: officialPluginIdsByAssembly).ToList();
+if (!string.Equals(Path.GetFullPath(bundledOfficialDirectory), Path.GetFullPath(officialDirectory),
+        OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal))
+{
+    officialPlugins.AddRange(PluginLoader.LoadDirectory(
+        app.Services, officialDirectory, official: true, requiredIds: requiredPluginSets.Official,
+        pluginIdsByAssembly: officialPluginIdsByAssembly));
+}
 foreach (var plugin in officialPlugins)
     reservedPluginIds.Add(plugin.Descriptor.Id);
 var communityPlugins = PluginLoader.LoadDirectory(
@@ -427,5 +521,31 @@ var communityPlugins = PluginLoader.LoadDirectory(
 app.Services.GetRequiredService<PluginRegistry>().Reset(
     officialPlugins.Concat(communityPlugins),
     communityPlugins.Select(plugin => plugin.Descriptor.Id));
+_ = scopeSecurityCatalog.ScopesFor(officialPlugins.Concat(communityPlugins));
 
 app.Run();
+
+static void MigrateLegacyPluginSettings(string appSettingsPath)
+{
+    var text = File.ReadAllText(appSettingsPath);
+    var root = System.Text.Json.Nodes.JsonNode.Parse(
+        text,
+        nodeOptions: null,
+        new System.Text.Json.JsonDocumentOptions { CommentHandling = System.Text.Json.JsonCommentHandling.Skip, AllowTrailingCommas = true })
+        as System.Text.Json.Nodes.JsonObject;
+    if (root is null) return;
+    var plugins = root["Plugins"] as System.Text.Json.Nodes.JsonObject;
+    var legacyRequired = plugins?["Required"] as System.Text.Json.Nodes.JsonObject;
+    if (legacyRequired is null) return;
+    var settings = root["Settings"] as System.Text.Json.Nodes.JsonObject ?? new System.Text.Json.Nodes.JsonObject();
+    root["Settings"] = settings;
+    var settingsPlugins = settings["Plugins"] as System.Text.Json.Nodes.JsonObject ?? new System.Text.Json.Nodes.JsonObject();
+    settings["Plugins"] = settingsPlugins;
+    if (settingsPlugins["Required"] is null)
+        settingsPlugins["Required"] = legacyRequired.DeepClone();
+    plugins!.Remove("Required");
+    if (plugins.Count == 0) root.Remove("Plugins");
+    var temp = $"{appSettingsPath}.{Guid.NewGuid():N}.tmp";
+    File.WriteAllText(temp, root.ToJsonString(new System.Text.Json.JsonSerializerOptions { WriteIndented = true }) + Environment.NewLine);
+    File.Move(temp, appSettingsPath, overwrite: true);
+}

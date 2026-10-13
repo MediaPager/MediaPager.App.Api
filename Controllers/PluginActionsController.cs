@@ -3,7 +3,7 @@ using Microsoft.AspNetCore.Mvc;
 namespace MediaPager.App.Api.Controllers;
 
 [ApiController]
-public sealed class PluginActionsController(PluginRegistry registry) : ControllerBase
+public sealed class PluginActionsController(PluginRegistry registry, ScopeSecurityCatalog scopeCatalog) : ControllerBase
 {
     [HttpPost("/plugins/{key}/actions/{actionId}")]
     public async Task<IActionResult> Dispatch(
@@ -38,6 +38,17 @@ public sealed class PluginActionsController(PluginRegistry registry) : Controlle
         if (!descriptor.Enabled)
             return Conflict(Problem(descriptor.AvailabilityMessage ?? $"Action '{descriptor.Label}' is not configured.",
                 statusCode: StatusCodes.Status409Conflict));
+        if (!string.IsNullOrWhiteSpace(descriptor.RequiredScope))
+        {
+            var requiredScope = scopeCatalog.PluginScopeClaim(plugin, descriptor.RequiredScope);
+            if (requiredScope is null)
+                return Problem($"Action '{descriptor.Label}' refers to an undeclared plugin scope.",
+                    statusCode: StatusCodes.Status500InternalServerError);
+            var userScopes = User.FindAll("scope").Select(claim => ScopeSecurityCatalog.CanonicalizeLegacy(claim.Value));
+            if (!userScopes.Contains("admin:super", StringComparer.OrdinalIgnoreCase) &&
+                !userScopes.Contains(requiredScope, StringComparer.OrdinalIgnoreCase))
+                return Forbid();
+        }
         if (descriptor.Click != PluginActionClick.Dispatch)
             return BadRequest(Problem("This action opens plugin UI and cannot be dispatched.", statusCode: StatusCodes.Status400BadRequest));
 
@@ -61,6 +72,7 @@ public sealed class PluginActionsController(PluginRegistry registry) : Controlle
             request.Year)
         {
             Metadata = request.Metadata,
+            UserScopes = User.FindAll("scope").Select(claim => ScopeSecurityCatalog.CanonicalizeLegacy(claim.Value)).ToArray(),
         };
         try
         {

@@ -124,7 +124,7 @@ public sealed class SubtitlesController(
     private async Task<bool> IsConfiguredAsync(ISubtitleProviderPlugin provider, CancellationToken cancellationToken)
     {
         if (provider is not IPluginSettingsSchema schema) return true;
-        var settingsKey = provider.Descriptor.Id.Split('.')[^1];
+        var settingsKey = provider.Descriptor.Id;
         foreach (var setting in schema.Settings.Where(setting => setting.Required))
         {
             if (string.IsNullOrWhiteSpace(await pluginSettings.GetAsync(settingsKey, setting.Key, cancellationToken)))

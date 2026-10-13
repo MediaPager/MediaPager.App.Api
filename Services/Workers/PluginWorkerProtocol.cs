@@ -33,7 +33,8 @@ internal sealed record PluginWorkerDescription(
     PluginSettingDefinition[] Settings,
     PluginActionDescriptor[] Actions,
     PluginSettingsNav? SettingsNav,
-    PluginMenuEntry[] MainNav);
+    PluginMenuEntry[] MainNav,
+    PluginScopeDefinition[] Scopes);
 
 internal sealed record PluginWorkerResolveArguments(StreamResolveRequest Request);
 internal sealed record PluginWorkerBrowseArguments(string SourceKey, string? Query, int Page);
