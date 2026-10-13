@@ -302,7 +302,6 @@ builder.Services.AddScoped<EmailSender>();
 builder.Services.AddScoped<IRuntimeSettings, RuntimeSettingsService>();
 builder.Services.AddSingleton(scopeSecurityCatalog);
 builder.Services.AddScoped<GitSshPrivateKeyStore>();
-builder.Services.AddScoped<DatabasePasswordStore>();
 builder.Services.AddSingleton<IGitPrivateKeyProvider, GitSshPrivateKeyProvider>();
 builder.Services.AddSingleton<IDataProtectionProvider>(bootstrapDataProtectionProvider);
 builder.Services.AddSingleton<IPluginSettingsValueProtector, PluginSettingsValueProtector>();
@@ -372,13 +371,12 @@ await using (var scope = app.Services.CreateAsyncScope())
 {
     var database = scope.ServiceProvider.GetRequiredService<AuthDbContext>();
     await database.Database.MigrateAsync();
-    var databasePasswordStore = scope.ServiceProvider.GetRequiredService<DatabasePasswordStore>();
-    await databasePasswordStore.SeedOrMigrateAsync();
     var runtimeSettings = scope.ServiceProvider.GetRequiredService<IRuntimeSettings>();
+    await runtimeSettings.RemoveDatabaseSettingsAsync();
     await runtimeSettings.SeedMissingFromConfigurationAsync();
     var storedSettings = await runtimeSettings.GetAllAsync();
-    DatabaseBootstrapFile.Write(DatabaseBootstrapFile.PathFor(storageLayout), storedSettings,
-        await databasePasswordStore.GetProtectedValueAsync());
+    DatabaseBootstrapFile.Write(DatabaseBootstrapFile.PathFor(storageLayout), builder.Configuration,
+        bootstrapDataProtectionProvider);
     builder.Configuration.AddInMemoryCollection(storedSettings.ToDictionary(
         pair => pair.Key, pair => (string?)pair.Value, StringComparer.OrdinalIgnoreCase));
     // Deployment environment variables remain the final override over runtime DB values.
