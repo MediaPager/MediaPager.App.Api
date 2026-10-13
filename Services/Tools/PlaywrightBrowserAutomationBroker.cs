@@ -158,12 +158,15 @@ public sealed class PlaywrightBrowserAutomationBroker(
             }
             catch (Exception exception)
             {
+                logger.LogError(exception,
+                    "Managed Chromium failed to start from {BrowserPath}.",
+                    Environment.GetEnvironmentVariable("PLAYWRIGHT_BROWSERS_PATH"));
                 _playwright?.Dispose();
                 _playwright = null;
                 throw new PluginOperationException(new PluginError(
                     "browser.chromium.unavailable",
                     "The managed Chromium browser could not start.",
-                    "The host provisions the pinned browser in its tools cache. On Linux, install the desktop browser runtime libraries required by Playwright."), exception);
+                    $"Browser launch error: {exception.Message}. The host provisions the pinned browser in its tools cache. Check the API log for the full launch details."), exception);
             }
         }
         finally

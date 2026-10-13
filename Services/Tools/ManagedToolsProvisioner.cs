@@ -39,6 +39,7 @@ public sealed class ManagedToolsProvisioner(
             ?? readiness.OrderByDescending(item => (item.FfmpegReady ? 1 : 0) + (item.ChromiumReady ? 1 : 0)).FirstOrDefault()
             ?? new ToolReadiness(directories.PreferredInstallRoot, false, false);
         directories.SelectRoot(selected.Root);
+        PlaywrightBrowserInstaller.ConfigureBrowserPath(selected.Root);
 
         var missingCount = (selected.FfmpegReady ? 0 : 1) + (selected.ChromiumReady ? 0 : 1);
         if (missingCount == 0)

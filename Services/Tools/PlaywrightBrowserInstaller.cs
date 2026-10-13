@@ -9,9 +9,16 @@ public sealed class PlaywrightBrowserInstaller(ManagedToolDirectory toolDirector
     private const string Version = "1.63.0";
     private static readonly SemaphoreSlim InstallGate = new(1, 1);
 
-    public bool IsChromiumInstalled(string? toolsRoot = null)
+    public static string ConfigureBrowserPath(string toolsRoot)
     {
         var browserDirectory = BrowserDirectory(toolsRoot);
+        Environment.SetEnvironmentVariable("PLAYWRIGHT_BROWSERS_PATH", browserDirectory);
+        return browserDirectory;
+    }
+
+    public bool IsChromiumInstalled(string? toolsRoot = null)
+    {
+        var browserDirectory = BrowserDirectory(toolsRoot ?? toolDirectory.Root);
         return IsInstalled(browserDirectory, Path.Combine(browserDirectory, "mediapager-browser-manifest.json"));
     }
 
@@ -20,8 +27,7 @@ public sealed class PlaywrightBrowserInstaller(ManagedToolDirectory toolDirector
         IProgress<MediaToolProgress>? progress = null,
         string? toolsRoot = null)
     {
-        var browserDirectory = BrowserDirectory(toolsRoot);
-        Environment.SetEnvironmentVariable("PLAYWRIGHT_BROWSERS_PATH", browserDirectory);
+        var browserDirectory = ConfigureBrowserPath(toolsRoot ?? toolDirectory.Root);
         var markerPath = Path.Combine(browserDirectory, "mediapager-browser-manifest.json");
         if (IsInstalled(browserDirectory, markerPath))
         {
@@ -68,8 +74,8 @@ public sealed class PlaywrightBrowserInstaller(ManagedToolDirectory toolDirector
     private static bool IsInstalled(string directory, string markerPath) =>
         File.Exists(markerPath) && ContainsChromium(directory);
 
-    private string BrowserDirectory(string? toolsRoot) =>
-        Path.Combine(Path.GetFullPath(toolsRoot ?? toolDirectory.Root), "playwright", Version);
+    private static string BrowserDirectory(string toolsRoot) =>
+        Path.Combine(Path.GetFullPath(Environment.ExpandEnvironmentVariables(toolsRoot)), "playwright", Version);
 
     private static bool ContainsChromium(string directory) => Directory.Exists(directory) &&
         (Directory.EnumerateDirectories(directory, "chromium-*", SearchOption.TopDirectoryOnly).Any() ||
