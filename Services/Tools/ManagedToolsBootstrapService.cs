@@ -7,6 +7,7 @@ namespace MediaPager.App.Api.Services.Tools;
 /// requests. Docker can delegate provisioning to its root entrypoint while this API process
 /// remains unprivileged and mirrors the bootstrap status into Activity.</summary>
 public sealed class ManagedToolsBootstrapService(
+    ManagedToolDirectory directories,
     ManagedToolsProvisioner provisioner,
     IPluginBuildSdkProvider buildSdkProvider,
     PluginActivityStore activity,
@@ -161,13 +162,17 @@ public sealed class ManagedToolsBootstrapService(
                     if (status.State == "running")
                         job.Report(status.Progress, status.Message);
                     else if (status.State == "ready")
+                    {
+                        SelectRuntimeToolsDirectory(status.ToolDirectory);
                         CompleteBootstrap(job, new ManagedToolsBootstrapResult(status.ToolDirectory ?? "", true, []));
+                    }
                     else
                         FailExternalBootstrap(job, status.Error ?? status.Message);
                     if (status.State is "ready" or "failed") return;
                 }
                 else if (status.State == "ready" && status.NeedsInstallation == false)
                 {
+                    SelectRuntimeToolsDirectory(status.ToolDirectory);
                     logger.LogInformation("The Docker tools volume already contains a valid tool cache at {ToolsDirectory}.",
                         status.ToolDirectory);
                     if (job is not null)
@@ -204,6 +209,17 @@ public sealed class ManagedToolsBootstrapService(
         }
 
         job?.Cancel();
+    }
+
+    private void SelectRuntimeToolsDirectory(string? toolsDirectory)
+    {
+        if (string.IsNullOrWhiteSpace(toolsDirectory)) return;
+
+        var selectedRoot = Path.GetFullPath(toolsDirectory);
+        directories.SelectRoot(selectedRoot);
+        var browserDirectory = PlaywrightBrowserInstaller.ConfigureBrowserPath(selectedRoot);
+        logger.LogInformation("Using managed tools directory {ToolsDirectory} and Playwright browser directory {BrowserDirectory}.",
+            selectedRoot, browserDirectory);
     }
 
     private void CompleteBootstrap(PluginJob job, ManagedToolsBootstrapResult result)
