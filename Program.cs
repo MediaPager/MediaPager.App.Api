@@ -382,6 +382,7 @@ await using (var scope = app.Services.CreateAsyncScope())
     // Deployment environment variables remain the final override over runtime DB values.
     builder.Configuration.AddEnvironmentVariables(prefix: "MEDIAPAGER_");
     storageLayout.Refresh();
+    PlaywrightBrowserInstaller.ConfigureBrowserPath(storageLayout.ToolsDirectory);
     ArtworkStorage.MigrateLegacyDefaultArtwork(storageLayout.DataRoot);
 
     // Seed the catalog lookup tables (idempotent — insert only what's missing).
