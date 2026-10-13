@@ -249,9 +249,9 @@ internal sealed class PluginWorkerProcess : IDisposable
                 throw new PluginOperationException(new PluginError("plugin.settings.denied", "The plugin may only access its own settings."));
             return message.Operation switch
             {
-                "get" => PluginWorkerJson.ToElement(await _settings.GetAsync(_settingsKey, request.Name, cancellationToken)),
+                "get" => PluginWorkerJson.ToElement(await _settings.GetAsync(_pluginId, request.Name, cancellationToken)),
                 "set" => await SetSettingAsync(request, cancellationToken),
-                "get-all" => PluginWorkerJson.ToElement(await _settings.GetAllAsync(_settingsKey, cancellationToken)),
+                "get-all" => PluginWorkerJson.ToElement(await _settings.GetAllAsync(_pluginId, cancellationToken)),
                 _ => throw new PluginOperationException(new PluginError("plugin.settings.operation", "Unsupported settings operation.")),
             };
         }
@@ -436,7 +436,7 @@ internal sealed class PluginWorkerProcess : IDisposable
 
     private async Task<JsonElement> SetSettingAsync(PluginWorkerSettingsArguments request, CancellationToken cancellationToken)
     {
-        await _settings.SetAsync(_settingsKey, request.Name, request.Value, cancellationToken);
+        await _settings.SetAsync(_pluginId, request.Name, request.Value, cancellationToken);
         return PluginWorkerJson.ToElement(true);
     }
 

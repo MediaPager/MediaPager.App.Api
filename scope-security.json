@@ -1,0 +1,11 @@
+{
+  // Scope IDs are normalized to the existing lowercase, kebab-case claim format.
+  "Admin": [
+    { "id": "Super", "desc": "Full administrative access.", "permissions": ["*"] },
+    { "id": "SettingsEdit", "desc": "Edit application settings.", "permissions": ["settings:edit"] },
+    { "id": "CatalogsEdit", "desc": "Manage media catalogs.", "permissions": ["catalogs:edit"] }
+  ],
+  "Users": [
+    { "id": "CanInvite", "desc": "Invite read-only users.", "permissions": ["users:invite"] }
+  ]
+}

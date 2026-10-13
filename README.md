@@ -70,25 +70,32 @@ dotnet user-secrets set "Auth:SigningKey" "$(openssl rand -base64 48)" --project
 ```
 
 - **Email:** sent by an email provider plugin, not host config. SMTP and Mailgun ship
-  loaded; pick one (and its credentials) under **Settings → Email** in the SPA — the
-  values are stored as plugin settings (`plugins.smtp.*` / `plugins.mailgun.*`), never in
-  this repo. Gmail and Office 365 are optional installs (see
-  `Plugins:Official` in `appsettings.json` for the links).
+  loaded; pick one under **Settings → General**. Each provider declares its fields with
+  `IPluginSettingsSchema`; values are stored by full plugin id under
+  `Settings:Plugins:mediapager.email.<provider>`. Schema-marked secrets are protected at rest
+  and never returned to the UI. Legacy `plugins.<short-key>.*` values migrate on first use.
 
-- **Database:** SQLite is the default (`%APPDATA%/MediaPager/db/mediapager.db` on Windows,
-  `~/.MediaPager/db/mediapager.db` on macOS/Linux). Set `MEDIAPAGER_Database__Provider` to
-  `PostgreSQL` and provide `MEDIAPAGER_ConnectionStrings__AuthDatabase` to use PostgreSQL.
+- **Database:** Settings use `Settings:Db` and are initialized from appsettings/environment
+  on first boot. SQLite is the default (`/data/db/mediapager-auth.db` in Docker;
+  `%APPDATA%/MediaPager/db/mediapager.db` on Windows and `~/.MediaPager/db/mediapager.db`
+  on macOS/Linux). Use `MEDIAPAGER_Settings__Db__Provider=PostgreSQL` and set the PostgreSQL
+  host, catalog, user, and password to use PostgreSQL.
   Each provider has its own EF migration set for the same `AuthDbContext`; pending migrations
-  apply automatically at startup. `MEDIAPAGER_DB_PATH` and `MEDIAPAGER_Auth__DatabasePath`
-  are SQLite-only overrides. Changing providers migrates the schema in the selected database;
-  it does not copy rows between databases. The JWT signing key persists beside a SQLite DB,
-  or at `MEDIAPAGER_Auth__SigningKeyPath` when configured.
+  apply automatically at startup. Database settings are persisted in the runtime settings DB;
+  provider changes select a different database and do not copy rows between databases. Legacy
+  `Database:Provider`, `ConnectionStrings:AuthDatabase`, `MEDIAPAGER_DB_PATH`, and
+  `Auth:DatabasePath` are accepted as bootstrap aliases.
 - **Initial account:** `MEDIAPAGER_SEED_USER` sets the first super-admin email/login and
   `MEDIAPAGER_SEED_PASS` optionally supplies its initial password. These apply only when
   the first account is created.
 - **TMDB:** `MEDIAPAGER_TMDB_API_KEY` supplies the TMDB plugin key when no value is saved
   in the plugin settings.
-- **`Frontend:BaseUrl`** (default `http://localhost:5173`) — used in email links.
+- **`Settings:Site:BaseUrl`** (default `http://localhost:5173`) — used in invitation and
+  password-reset links. The Settings editor persists an override in the runtime database;
+  environment variables remain an explicit deployment override.
+- **Storage:** MediaPager-managed writable files default below `Settings:Storage:Root`
+  (`/data` in Docker; `~/.MediaPager` on macOS/Linux). Catalog media remains at each catalog's
+  configured path.
 
 ## Run
 

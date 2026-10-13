@@ -185,7 +185,7 @@ internal sealed class PluginWorkerStreamProviderProxy(
     string pluginDirectory,
     PluginWorkerDescription description,
     Func<PluginWorkerProcess> getWorker,
-    Action stopWorker) : IStreamProviderPlugin, IPluginSettingsSchema, IPluginActions, IPluginUiAssetProvider, IDisposable
+    Action stopWorker) : IStreamProviderPlugin, IPluginSettingsSchema, IPluginActions, IPluginScopeSchema, IPluginUiAssetProvider, IDisposable
 {
     public PluginDescriptor Descriptor => description.Descriptor;
     public string PluginUiDirectory => Path.Combine(pluginDirectory, "ui");
@@ -194,9 +194,11 @@ internal sealed class PluginWorkerStreamProviderProxy(
     public IReadOnlyList<MediaKind> SupportedKinds => description.SupportedKinds;
     public IReadOnlyList<PluginSettingDefinition> Settings => description.Settings;
     public IReadOnlyList<PluginActionDescriptor> Actions => description.Actions;
+    public IReadOnlyList<PluginScopeDefinition> Scopes => description.Scopes;
 
-    public Task<IReadOnlyList<PluginActionDescriptor>> GetActionsAsync(CancellationToken cancellationToken) =>
-        getWorker().InvokeAsync<IReadOnlyList<PluginActionDescriptor>>("actions.list", new { }, cancellationToken);
+    public async Task<IReadOnlyList<PluginActionDescriptor>> GetActionsAsync(CancellationToken cancellationToken) =>
+        await getWorker().InvokeAsync<IReadOnlyList<PluginActionDescriptor>>("actions.list", new { }, cancellationToken)
+        ?? Array.Empty<PluginActionDescriptor>();
 
     public async Task InvokeActionAsync(PluginActionContext context, CancellationToken cancellationToken) =>
         _ = await getWorker().InvokeAsync<bool>("actions.invoke", new PluginWorkerActionArguments(context), cancellationToken);
@@ -230,17 +232,19 @@ internal sealed class PluginWorkerActionProxy(
     string pluginDirectory,
     PluginWorkerDescription description,
     Func<PluginWorkerProcess> getWorker,
-    Action stopWorker) : IMediaPagerPlugin, IPluginActions, IPluginSettingsSchema, IPluginNavigation, IPluginUiAssetProvider, IDisposable
+    Action stopWorker) : IMediaPagerPlugin, IPluginActions, IPluginSettingsSchema, IPluginNavigation, IPluginScopeSchema, IPluginUiAssetProvider, IDisposable
 {
     public PluginDescriptor Descriptor => description.Descriptor;
     public string PluginUiDirectory => Path.Combine(pluginDirectory, "ui");
     public IReadOnlyList<PluginActionDescriptor> Actions => description.Actions;
     public IReadOnlyList<PluginSettingDefinition> Settings => description.Settings;
+    public IReadOnlyList<PluginScopeDefinition> Scopes => description.Scopes;
     public PluginSettingsNav? SettingsNav => description.SettingsNav;
     public IReadOnlyList<PluginMenuEntry> MainNav => description.MainNav;
 
-    public Task<IReadOnlyList<PluginActionDescriptor>> GetActionsAsync(CancellationToken cancellationToken) =>
-        getWorker().InvokeAsync<IReadOnlyList<PluginActionDescriptor>>("actions.list", new { }, cancellationToken);
+    public async Task<IReadOnlyList<PluginActionDescriptor>> GetActionsAsync(CancellationToken cancellationToken) =>
+        await getWorker().InvokeAsync<IReadOnlyList<PluginActionDescriptor>>("actions.list", new { }, cancellationToken)
+        ?? Array.Empty<PluginActionDescriptor>();
 
     public async Task InvokeActionAsync(PluginActionContext context, CancellationToken cancellationToken) =>
         _ = await getWorker().InvokeAsync<bool>("actions.invoke", new PluginWorkerActionArguments(context), cancellationToken);

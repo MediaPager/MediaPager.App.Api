@@ -12,6 +12,7 @@ namespace MediaPager.App.Api.Controllers;
 public sealed class CatalogItemsController(
     AuthDbContext database,
     ArtworkStorage artwork,
+    StorageLayout storageLayout,
     LocalFileSessionState localSessions,
     IRuntimeSettings settings,
     IHttpClientFactory httpClientFactory) : ControllerBase
@@ -529,12 +530,13 @@ public sealed class CatalogItemsController(
         if (file is not { Length: > 0 }) return BadRequest(new { error = "An image file is required." });
         if (file.Length > 6 * 1024 * 1024) return BadRequest(new { error = "Image files must be 6 MB or smaller." });
 
+        if (!IsArtworkKind(kind)) return BadRequest(new { error = "Artwork kind must be poster or backdrop." });
         var extension = Path.GetExtension(file.FileName).ToLowerInvariant();
         if (extension is not (".png" or ".jpg" or ".jpeg" or ".webp" or ".gif" or ".avif"))
             return BadRequest(new { error = "Unsupported image type. Use PNG, JPG, JPEG, WEBP, GIF or AVIF." });
 
-        var fileName = artwork.Save(await ArtworkDirectoryAsync(cancellationToken), file.OpenReadStream(), extension);
-        var url = $"{Request.Scheme}://{Request.Host}/artwork/{fileName}";
+        var fileName = artwork.Save(await ArtworkDirectoryAsync(kind, cancellationToken), file.OpenReadStream(), extension);
+        var url = $"{Request.Scheme}://{Request.Host}/artwork/{ArtworkRouteKind(kind)}/{fileName}";
         SetArtwork(item, kind, url);
         item.ModifiedAt = DateTimeOffset.UtcNow;
         await database.SaveChangesAsync(cancellationToken);
@@ -551,6 +553,7 @@ public sealed class CatalogItemsController(
     [Authorize(Policy = "CanEditCatalogs")]
     public async Task<IActionResult> IngestArtwork(int id, ArtworkUrlRequest request, [FromQuery] string kind = "poster", CancellationToken cancellationToken = default)
     {
+        if (!IsArtworkKind(kind)) return BadRequest(new { error = "Artwork kind must be poster or backdrop." });
         var item = await database.CatalogItems.FirstOrDefaultAsync(entry => entry.Id == id, cancellationToken);
         if (item is null) return NotFound();
 
@@ -582,8 +585,8 @@ public sealed class CatalogItemsController(
             return BadRequest(new { error = "That URL does not point at a supported image." });
 
         await using var stream = new MemoryStream(bytes);
-        var fileName = artwork.Save(await ArtworkDirectoryAsync(cancellationToken), stream, extension);
-        var url = $"{Request.Scheme}://{Request.Host}/artwork/{fileName}";
+        var fileName = artwork.Save(await ArtworkDirectoryAsync(kind, cancellationToken), stream, extension);
+        var url = $"{Request.Scheme}://{Request.Host}/artwork/{ArtworkRouteKind(kind)}/{fileName}";
         SetArtwork(item, kind, url);
         item.ModifiedAt = DateTimeOffset.UtcNow;
         await database.SaveChangesAsync(cancellationToken);
@@ -691,6 +694,14 @@ public sealed class CatalogItemsController(
         else item.ImageUrl = url;
     }
 
+    private static bool IsArtworkKind(string kind) =>
+        kind.Equals("poster", StringComparison.OrdinalIgnoreCase) ||
+        kind.Equals("backdrop", StringComparison.OrdinalIgnoreCase) ||
+        kind.Equals("background", StringComparison.OrdinalIgnoreCase);
+
+    private static string ArtworkRouteKind(string kind) =>
+        kind.Equals("poster", StringComparison.OrdinalIgnoreCase) ? "poster" : "background";
+
     // POST /catalog-items/{id}/local — mint a short-lived capability URL for playing the
     // item's file on disk (the media element can't carry our auth token).
     [HttpPost("{id:int}/local")]
@@ -746,13 +757,49 @@ public sealed class CatalogItemsController(
         var name = Path.GetFileName(fileName);
         if (!string.Equals(name, fileName, StringComparison.Ordinal) || name.Contains("..", StringComparison.Ordinal))
             return BadRequest();
-        var path = Path.Combine(await ArtworkDirectoryAsync(cancellationToken), name);
-        if (!System.IO.File.Exists(path)) return NotFound();
-        return PhysicalFile(path, MimeForImage(name));
+        var candidates = new[]
+        {
+            await LegacyArtworkDirectoryAsync(cancellationToken),
+            await ArtworkDirectoryAsync("poster", cancellationToken),
+            await ArtworkDirectoryAsync("backdrop", cancellationToken),
+        }.Distinct(StringComparer.Ordinal).Select(directory => Path.Combine(directory, name));
+        var path = candidates.FirstOrDefault(System.IO.File.Exists);
+        return path is null ? NotFound() : PhysicalFile(path, MimeForImage(name));
     }
 
-    private async Task<string> ArtworkDirectoryAsync(CancellationToken cancellationToken) =>
-        ArtworkStorage.ResolveDirectory(await settings.GetAsync(RuntimeSettingKeys.ArtworkDirectory, cancellationToken));
+    [HttpGet("/artwork/{kind}/{fileName}")]
+    [AllowAnonymous]
+    public async Task<IActionResult> ServeCategorizedArtwork(string kind, string fileName, CancellationToken cancellationToken)
+    {
+        if (!kind.Equals("poster", StringComparison.OrdinalIgnoreCase) &&
+            !kind.Equals("background", StringComparison.OrdinalIgnoreCase))
+            return NotFound();
+        var name = Path.GetFileName(fileName);
+        if (!string.Equals(name, fileName, StringComparison.Ordinal) || name.Contains("..", StringComparison.Ordinal))
+            return BadRequest();
+        var directory = await ArtworkDirectoryAsync(kind, cancellationToken);
+        var path = Path.Combine(directory, name);
+        return !System.IO.File.Exists(path) ? NotFound() : PhysicalFile(path, MimeForImage(name));
+    }
+
+    private async Task<string> ArtworkDirectoryAsync(string kind, CancellationToken cancellationToken)
+    {
+        var key = kind.Equals("poster", StringComparison.OrdinalIgnoreCase)
+            ? RuntimeSettingKeys.ArtworkPosterDirectory
+            : RuntimeSettingKeys.ArtworkBackgroundDirectory;
+        var specific = await settings.GetAsync(key, cancellationToken);
+        var legacy = await settings.GetAsync(RuntimeSettingKeys.ArtworkDirectory, cancellationToken);
+        return ArtworkStorage.ResolveCategoryDirectory(specific, legacy, storageLayout.DataRoot,
+            poster: kind.Equals("poster", StringComparison.OrdinalIgnoreCase));
+    }
+
+    private async Task<string> LegacyArtworkDirectoryAsync(CancellationToken cancellationToken)
+    {
+        var configured = await settings.GetAsync(RuntimeSettingKeys.ArtworkDirectory, cancellationToken);
+        if (!string.IsNullOrWhiteSpace(configured)) return ArtworkStorage.ResolveDirectory(configured);
+        var migrated = Path.Combine(storageLayout.DataRoot, "artwork", "legacy");
+        return Directory.Exists(migrated) ? migrated : ArtworkStorage.LegacyDefaultDirectory();
+    }
 
     private async Task<CatalogItem?> LoadAsync(int id, CancellationToken cancellationToken) =>
         await database.CatalogItems.AsNoTracking()

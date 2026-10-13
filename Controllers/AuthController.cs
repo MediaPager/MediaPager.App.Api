@@ -30,7 +30,7 @@ public sealed class AuthController(
     public async Task<IActionResult> Login(LoginRequest request, CancellationToken cancellationToken)
     {
         var user = await users.FindByEmailAsync(request.Email.Trim());
-        if (user is null || !await users.CheckPasswordAsync(user, request.Password))
+        if (user is null || !user.IsActive || user.DeletedAt is not null || !await users.CheckPasswordAsync(user, request.Password))
             return Unauthorized();
 
         var expiresAt = DateTime.UtcNow.AddHours(8);
@@ -60,8 +60,8 @@ public sealed class AuthController(
         const string genericText = "If an account exists for that email, a password reset link will be sent.";
         var frontendBaseUrl = await runtimeSettings.GetAsync(RuntimeSettingKeys.FrontendBaseUrl, cancellationToken);
         var emailConfigured = await emailSender.IsConfiguredAsync(cancellationToken);
-        var baseUrlValid = Uri.TryCreate(frontendBaseUrl, UriKind.Absolute, out var frontendUri) && IsAllowedFrontendUri(frontendUri);
-        if (!emailConfigured || !baseUrlValid)
+        var baseUrlValid = Uri.TryCreate(frontendBaseUrl, UriKind.Absolute, out var frontendUri) && FrontendUrlPolicy.IsAllowed(frontendUri);
+        if (!emailConfigured || !baseUrlValid || frontendUri is null)
         {
             logger.LogWarning("Password reset requested but the email provider or Frontend:BaseUrl is not fully configured.");
             return Ok(new { message = genericText, sent = false, debug =
@@ -135,7 +135,7 @@ public sealed class AuthController(
             return BadRequest(new { error = "Enter a valid email address." });
         if (!await emailSender.IsConfiguredAsync(cancellationToken) ||
             !Uri.TryCreate(await runtimeSettings.GetAsync(RuntimeSettingKeys.FrontendBaseUrl, cancellationToken), UriKind.Absolute, out var frontendUri) ||
-            !IsAllowedFrontendUri(frontendUri))
+            !FrontendUrlPolicy.IsAllowed(frontendUri))
             return Problem("An email provider and Frontend:BaseUrl must be configured to send invitations.",
                 statusCode: StatusCodes.Status503ServiceUnavailable);
 
@@ -213,21 +213,6 @@ public sealed class AuthController(
         return Ok(new { message = "Password changed. Other sessions have been signed out." });
     }
 
-    // Allow https for any host, and http for loopback/localhost and private LAN addresses
-    // (RFC1918: 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16) so LAN deployments work without TLS.
-    private static bool IsAllowedFrontendUri(Uri uri)
-    {
-        if (uri.Scheme == Uri.UriSchemeHttps) return true;
-        if (uri.Scheme != Uri.UriSchemeHttp) return false;
-        if (uri.Host.Equals("localhost", StringComparison.OrdinalIgnoreCase)) return true;
-        if (!System.Net.IPAddress.TryParse(uri.Host, out var ip)) return false;
-        if (System.Net.IPAddress.IsLoopback(ip)) return true;
-        if (ip.AddressFamily != System.Net.Sockets.AddressFamily.InterNetwork) return false;
-        var b = ip.GetAddressBytes();
-        return b[0] == 10
-            || (b[0] == 172 && b[1] is >= 16 and <= 31)
-            || (b[0] == 192 && b[1] == 168);
-    }
 }
 
 public sealed record LoginRequest(string Email, string Password);

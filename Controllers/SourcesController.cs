@@ -21,12 +21,12 @@ public sealed class SourcesController(
     PluginJobsService pluginJobs,
     GitHubPluginDiscovery pluginDiscovery,
     ApiRestartCoordinator apiRestartCoordinator,
+    ScopeSecurityCatalog scopeCatalog,
     ILogger<SourcesController> logger) : ControllerBase
 {
-    // The plugin-settings namespace key is the descriptor id's last segment
-    // ("mediapager.search.tmdb" → "tmdb") — the same convention PluginSettingsService uses.
+    // Settings are namespaced by full descriptor id so plugins cannot collide on a short key.
     private static string PluginSettingsKey(IMediaPagerPlugin plugin) =>
-        plugin.Descriptor.Id.Split('.')[^1];
+        plugin.Descriptor.Id;
 
     // Category for SPA grouping: the plugins.official.json list entry when the id is
     // cataloged (the single source of truth), else derived from the plugin's capabilities.
@@ -119,6 +119,9 @@ public sealed class SourcesController(
                     secret = setting.Secret,
                     defaultValue = setting.Default,
                     catalogTypeSlug = setting.CatalogTypeSlug,
+                    group = setting.Group,
+                    description = setting.Description,
+                    placeholder = setting.Placeholder,
                 }).ToArray()
                 : Array.Empty<object>(),
             actions = await ActionPayloadAsync(plugin, cancellationToken),
@@ -449,6 +452,7 @@ public sealed class SourcesController(
             .Select(plugin => plugin.Descriptor.Id)
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
         var officialDirectory = PluginDirectories.Official(configuration);
+        var bundledOfficialDirectory = PluginDirectories.BundledOfficial(configuration);
         var communityDirectory = PluginDirectories.Community(configuration);
         var available = new List<object>();
         foreach (var entry in officialEntries)
@@ -464,7 +468,8 @@ public sealed class SourcesController(
                 author = (string?)null,
                 official = true,
                 discoverable = true,
-                deployed = System.IO.File.Exists(Path.Combine(officialDirectory, assembly, $"{assembly}.dll")),
+                deployed = System.IO.File.Exists(Path.Combine(officialDirectory, assembly, $"{assembly}.dll")) ||
+                           System.IO.File.Exists(Path.Combine(bundledOfficialDirectory, assembly, $"{assembly}.dll")),
                 enabled = required.Contains(entry.Id),
                 locked = entry.SystemRequired,
                 lockReason = entry.SystemRequired ? "Required by the system." : null,
@@ -851,29 +856,49 @@ public sealed class SourcesController(
         .Distinct()
         .ToArray();
 
-    private static async Task<object[]> ActionPayloadAsync(IMediaPagerPlugin plugin, CancellationToken cancellationToken) =>
-        plugin is IPluginActions provider
-        ? (await provider.GetActionsAsync(cancellationToken)).Select(action => (object)new
+    private async Task<object[]> ActionPayloadAsync(IMediaPagerPlugin plugin, CancellationToken cancellationToken)
+    {
+        if (plugin is not IPluginActions provider) return [];
+        var actions = await provider.GetActionsAsync(cancellationToken);
+        var currentScopes = User.FindAll("scope")
+            .Select(claim => ScopeSecurityCatalog.CanonicalizeLegacy(claim.Value))
+            .ToArray();
+        return actions.Select(action =>
         {
-            actionId = action.ActionId,
-            label = action.Label,
-            icon = action.Icon,
-            surface = action.Surface.ToString(),
-            position = action.Position.ToString(),
-            order = action.Order,
-            kinds = action.Kinds?.Select(kind => kind.ToString().ToLowerInvariant()).ToArray(),
-            click = action.Click.ToString(),
-            uiPath = action.UiPath,
-            scope = action.Scope.ToString(),
-            hostActionId = action.HostActionId,
-            enabled = action.Enabled,
-            availabilityMessage = action.AvailabilityMessage,
-            availabilityPluginId = action.AvailabilityPluginId,
-            confirmationTitle = action.ConfirmationTitle,
-            confirmationMessage = action.ConfirmationMessage,
-            showLabel = action.ShowLabel,
-        }).ToArray()
-        : [];
+            string? requiredScope = null;
+            var hasRequiredScope = true;
+            if (!string.IsNullOrWhiteSpace(action.RequiredScope))
+            {
+                requiredScope = scopeCatalog.PluginScopeClaim(plugin, action.RequiredScope);
+                hasRequiredScope = requiredScope is not null &&
+                    (currentScopes.Contains("admin:super", StringComparer.OrdinalIgnoreCase) ||
+                     currentScopes.Contains(requiredScope, StringComparer.OrdinalIgnoreCase));
+            }
+            return (object)new
+            {
+                actionId = action.ActionId,
+                label = action.Label,
+                icon = action.Icon,
+                surface = action.Surface.ToString(),
+                position = action.Position.ToString(),
+                order = action.Order,
+                kinds = action.Kinds?.Select(kind => kind.ToString().ToLowerInvariant()).ToArray(),
+                click = action.Click.ToString(),
+                uiPath = action.UiPath,
+                scope = action.Scope.ToString(),
+                requiredScope,
+                hostActionId = action.HostActionId,
+                enabled = action.Enabled && hasRequiredScope,
+                availabilityMessage = !hasRequiredScope
+                    ? requiredScope is null ? "This action requires a valid plugin scope." : $"Requires {requiredScope}."
+                    : action.AvailabilityMessage,
+                availabilityPluginId = action.AvailabilityPluginId,
+                confirmationTitle = action.ConfirmationTitle,
+                confirmationMessage = action.ConfirmationMessage,
+                showLabel = action.ShowLabel,
+            };
+        }).ToArray();
+    }
 
     private (IMediaPagerPlugin? Plugin, IReadOnlyList<PluginSettingDefinition> Schema) FindPluginWithSchema(string key)
     {

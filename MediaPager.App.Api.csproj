@@ -45,6 +45,7 @@
          so appsettings.json stays a thin Required-by-id file. -->
     <Content Update="plugins.official.json" CopyToOutputDirectory="PreserveNewest" />
     <Content Update="plugins.community.json" CopyToOutputDirectory="PreserveNewest" />
+    <Content Update="scope-security.json" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <Content Include="ThirdPartyNotices/FFmpeg.md" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
 

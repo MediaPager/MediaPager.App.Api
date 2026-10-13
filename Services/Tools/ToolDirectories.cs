@@ -1,8 +1,8 @@
 namespace MediaPager.App.Api.Services.Tools;
 
-/// <summary>Selects a managed tool cache. An explicitly configured persistent volume is
-/// preferred when populated; otherwise existing tools beside the API binary (or the legacy
-/// per-user cache) are reused before a new installation target is chosen.</summary>
+/// <summary>Resolves the writable managed-tool cache under Settings:Storage. Existing
+/// adjacent/legacy caches are copied into the selected persistent directory once so upgrades
+/// retain downloaded tools without continuing to write beside the application image.</summary>
 public sealed class ManagedToolDirectory
 {
     private readonly string configuredRoot;
@@ -12,50 +12,79 @@ public sealed class ManagedToolDirectory
 
     public ManagedToolDirectory(IConfiguration configuration)
     {
-        var configured = configuration["Tools:Directory"];
-        configuredRoot = string.IsNullOrWhiteSpace(configured) ? "" : Path.GetFullPath(configured);
+        var configured = SettingsConfigurationKeys.ReadConfiguredValue(configuration, SettingsConfigurationKeys.ToolsDirectory);
+        var root = new StorageLayout(configuration).DataRoot;
+        configuredRoot = string.IsNullOrWhiteSpace(configured)
+            ? Path.Combine(root, "tools")
+            : Path.GetFullPath(Path.IsPathRooted(configured)
+                ? Environment.ExpandEnvironmentVariables(configured)
+                : Path.Combine(root, Environment.ExpandEnvironmentVariables(configured)));
         adjacentRoot = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "tools"));
         var legacyRoot = Path.GetFullPath(Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".MediaPager", "tools"));
-        candidates = new[] { configuredRoot, adjacentRoot, legacyRoot }
+        var legacyConfigured = Environment.GetEnvironmentVariable("MEDIAPAGER_Tools__Directory")
+            ?? configuration["Tools:Directory"];
+        var legacyConfiguredRoot = string.IsNullOrWhiteSpace(legacyConfigured) ? "" : Path.GetFullPath(legacyConfigured);
+        candidates = new[] { configuredRoot, legacyConfiguredRoot, adjacentRoot, legacyRoot }
             .Where(path => !string.IsNullOrWhiteSpace(path))
             .Distinct(OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal)
             .ToArray();
-        activeRoot = PreferredExistingRoot();
+        activeRoot = configuredRoot;
+        MigrateExistingCache(configuredRoot, candidates.Where(path =>
+            !string.Equals(path, configuredRoot,
+                OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal)));
     }
 
     public string Root => Volatile.Read(ref activeRoot);
 
-    public string PreferredInstallRoot => string.IsNullOrEmpty(configuredRoot) ? adjacentRoot : configuredRoot;
+    public string PreferredInstallRoot => configuredRoot;
 
     public IReadOnlyList<string> Candidates => candidates;
 
     public void SelectRoot(string root) => Interlocked.Exchange(ref activeRoot, Path.GetFullPath(root));
 
-    private string PreferredExistingRoot()
+    private static void MigrateExistingCache(string destination, IEnumerable<string> candidates)
     {
-        var bestRoot = PreferredInstallRoot;
-        var bestScore = 0;
-        foreach (var candidate in candidates)
-        {
-            var ffmpegPath = Path.Combine(candidate, "ffmpeg", "9.0.2");
-            var hasFfmpeg = false;
-            try
-            {
-                hasFfmpeg = Directory.Exists(ffmpegPath) &&
-                    Directory.EnumerateDirectories(ffmpegPath).Any(path => File.Exists(Path.Combine(path, "tool-manifest.json")));
-            }
-            catch (IOException) { }
+        Directory.CreateDirectory(destination);
+        var marker = Path.Combine(destination, ".legacy-cache-migrated-v1");
+        if (File.Exists(marker)) return;
+        foreach (var source in candidates.Where(HasManagedTools))
+            CopyDirectory(source, destination);
+        File.WriteAllText(marker, DateTimeOffset.UtcNow.ToString("O") + Environment.NewLine);
+    }
 
-            var hasChromium = File.Exists(Path.Combine(candidate, "playwright", "1.63.0", "mediapager-browser-manifest.json"));
-            var score = (hasFfmpeg ? 1 : 0) + (hasChromium ? 1 : 0);
-            if (score > bestScore)
+    private static bool HasManagedTools(string candidate)
+    {
+        if (!Directory.Exists(candidate)) return false;
+        try
+        {
+            return new[] { "ffmpeg/9.0.2", "playwright/1.63.0", "dotnet-sdk/10.0.401" }
+                .Any(tool => Directory.Exists(Path.Combine(candidate, tool)) &&
+                             Directory.EnumerateFileSystemEntries(Path.Combine(candidate, tool)).Any());
+        }
+        catch (IOException)
+        {
+            return false;
+        }
+    }
+
+    private static void CopyDirectory(string source, string destination)
+    {
+        foreach (var entry in Directory.EnumerateFileSystemEntries(source))
+        {
+            if ((File.GetAttributes(entry) & FileAttributes.ReparsePoint) != 0)
+                continue; // Let the tool verifier/bootstrapper re-create skipped links as needed.
+            var target = Path.Combine(destination, Path.GetFileName(entry));
+            if (Directory.Exists(entry))
             {
-                bestScore = score;
-                bestRoot = candidate;
+                Directory.CreateDirectory(target);
+                CopyDirectory(entry, target);
+            }
+            else if (!File.Exists(target))
+            {
+                File.Copy(entry, target);
             }
         }
-        return bestRoot;
     }
 }
 
