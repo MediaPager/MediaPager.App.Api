@@ -17,6 +17,7 @@ public sealed class SearchController(PluginRegistry registry) : ControllerBase
         [FromQuery] int limit = 5,
         [FromQuery] string? mediaTypeSlug = null,
         [FromQuery] string? catalogTypeSlug = null,
+        [FromQuery] int? catalogId = null,
         CancellationToken cancellationToken = default)
     {
         var query = (q ?? "").Trim();
@@ -37,7 +38,11 @@ public sealed class SearchController(PluginRegistry registry) : ControllerBase
             try
             {
                 return await provider.SearchAsync(
-                    new SearchRequest(query, resultLimit, supportedStreamKinds, mediaTypeSlug, catalogTypeSlug), cancellationToken);
+                    new SearchRequest(query, resultLimit, supportedStreamKinds, mediaTypeSlug, catalogTypeSlug)
+                    {
+                        CatalogId = catalogId,
+                    },
+                    cancellationToken);
             }
             catch
             {
@@ -49,6 +54,7 @@ public sealed class SearchController(PluginRegistry registry) : ControllerBase
 
         var providerHits = tasks.SelectMany(task => task.Result)
             .Where(hit => MatchesScope(hit, mediaTypeSlug, catalogTypeSlug))
+            .Where(hit => catalogId is null || hit.CatalogId == catalogId)
             .ToList();
         var localHits = providerHits
             .Where(hit => hit.CatalogItemId is not null)
