@@ -3,6 +3,7 @@ using System.Net.Mail;
 using System.Security.Claims;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 using System.Text.Encodings.Web;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Identity;
@@ -25,6 +26,10 @@ public sealed class AuthController(
     AuthTokenConfiguration tokenConfiguration,
     ILoggerFactory loggerFactory) : ControllerBase
 {
+    public const string MobileSessionTokenProvider = "MediaPager.MobileRefresh";
+    private static readonly TimeSpan AccessTokenLifetime = TimeSpan.FromHours(8);
+    private static readonly TimeSpan MobileRefreshTokenLifetime = TimeSpan.FromDays(90);
+
     [HttpPost("login")]
     [AllowAnonymous]
     public async Task<IActionResult> Login(LoginRequest request, CancellationToken cancellationToken)
@@ -33,19 +38,173 @@ public sealed class AuthController(
         if (user is null || !user.IsActive || user.DeletedAt is not null || !await users.CheckPasswordAsync(user, request.Password))
             return Unauthorized();
 
-        var expiresAt = DateTime.UtcNow.AddHours(8);
-        var claims = new[]
-        {
-            new Claim(JwtRegisteredClaimNames.Sub, user.Id),
-            new Claim(JwtRegisteredClaimNames.Email, user.Email ?? request.Email),
-            new Claim(JwtRegisteredClaimNames.Jti, Guid.NewGuid().ToString()),
-            new Claim("security_stamp", user.SecurityStamp ?? ""),
-        }.Concat(user.GetScopes().Select(scope => new Claim("scope", scope)));
-        var credentials = new SigningCredentials(tokenConfiguration.SigningKey, SecurityAlgorithms.HmacSha256);
-        var jwt = new JwtSecurityToken(tokenConfiguration.Issuer, tokenConfiguration.Issuer, claims,
-            expires: expiresAt, signingCredentials: credentials);
-        var accessToken = new JwtSecurityTokenHandler().WriteToken(jwt);
+        var (accessToken, expiresAt) = CreateAccessToken(user, DateTime.UtcNow.Add(AccessTokenLifetime));
         return Ok(new { accessToken, tokenType = "Bearer", expiresAt, scopes = user.GetScopes() });
+    }
+
+    /// <summary>Exchange credentials once for a revocable, rotating mobile refresh session.</summary>
+    [HttpPost("mobile-sessions")]
+    [AllowAnonymous]
+    public async Task<IActionResult> CreateMobileSession(MobileSessionLoginRequest request, CancellationToken cancellationToken)
+    {
+        var user = await users.FindByEmailAsync(request.Email.Trim());
+        if (user is null || !user.IsActive || user.DeletedAt is not null ||
+            !await users.CheckPasswordAsync(user, request.Password))
+            return Unauthorized();
+
+        var sessionId = Guid.NewGuid().ToString("N");
+        var now = DateTimeOffset.UtcNow;
+        var refreshToken = CreateRefreshToken(sessionId);
+        var state = new MobileRefreshTokenState(
+            HashRefreshSecret(refreshToken.Secret),
+            NormalizeDeviceName(request.DeviceName),
+            now,
+            now,
+            now.Add(MobileRefreshTokenLifetime),
+            user.SecurityStamp ?? "");
+
+        database.UserTokens.Add(new IdentityUserToken<string>
+        {
+            UserId = user.Id,
+            LoginProvider = MobileSessionTokenProvider,
+            Name = sessionId,
+            Value = JsonSerializer.Serialize(state),
+        });
+        await database.SaveChangesAsync(cancellationToken);
+
+        var (accessToken, accessExpiresAt) = CreateAccessToken(
+            user,
+            DateTime.UtcNow.Add(AccessTokenLifetime),
+            mobileSessionId: sessionId);
+        return Ok(new MobileSessionTokenResponse(
+            accessToken,
+            refreshToken.Token,
+            sessionId,
+            accessExpiresAt,
+            state.ExpiresAt,
+            user.GetScopes()));
+    }
+
+    /// <summary>Rotate the mobile refresh token and issue a new 8-hour access token.</summary>
+    [HttpPost("mobile-sessions/refresh")]
+    [AllowAnonymous]
+    public async Task<IActionResult> RefreshMobileSession(MobileRefreshRequest request, CancellationToken cancellationToken)
+    {
+        var found = await FindMobileRefreshSessionAsync(request.RefreshToken, cancellationToken);
+        if (found is null) return Unauthorized(new { error = "The mobile session expired or was revoked. Sign in again." });
+
+        var (record, state, user, secret) = found.Value;
+        if (!RefreshSecretMatches(secret, state.SecretHash)) return Unauthorized();
+
+        if (!user.IsActive || user.DeletedAt is not null ||
+            !string.Equals(user.SecurityStamp, state.SecurityStamp, StringComparison.Ordinal))
+        {
+            database.UserTokens.Remove(record);
+            await database.SaveChangesAsync(cancellationToken);
+            return Unauthorized(new { error = "The account session is no longer valid. Sign in again." });
+        }
+
+        var now = DateTimeOffset.UtcNow;
+        var rotatedToken = CreateRefreshToken(record.Name!);
+        var rotatedState = state with
+        {
+            SecretHash = HashRefreshSecret(rotatedToken.Secret),
+            LastUsedAt = now,
+            ExpiresAt = now.Add(MobileRefreshTokenLifetime),
+        };
+        record.Value = JsonSerializer.Serialize(rotatedState);
+        await database.SaveChangesAsync(cancellationToken);
+
+        var (accessToken, accessExpiresAt) = CreateAccessToken(
+            user,
+            DateTime.UtcNow.Add(AccessTokenLifetime),
+            mobileSessionId: record.Name);
+        return Ok(new MobileSessionTokenResponse(
+            accessToken,
+            rotatedToken.Token,
+            record.Name!,
+            accessExpiresAt,
+            rotatedState.ExpiresAt,
+            user.GetScopes()));
+    }
+
+    [HttpGet("mobile-sessions")]
+    public async Task<IActionResult> GetMobileSessions(CancellationToken cancellationToken)
+    {
+        var userId = User.FindFirstValue(JwtRegisteredClaimNames.Sub);
+        if (userId is null) return Unauthorized();
+
+        var records = await database.UserTokens.AsNoTracking()
+            .Where(token => token.UserId == userId && token.LoginProvider == MobileSessionTokenProvider)
+            .ToListAsync(cancellationToken);
+        var currentUser = await users.FindByIdAsync(userId);
+        var now = DateTimeOffset.UtcNow;
+        var expired = new List<IdentityUserToken<string>>();
+        var sessions = new List<MobileSessionDescriptor>();
+        var currentSessionId = User.FindFirstValue("mobile_session_id");
+        foreach (var record in records)
+        {
+            var state = DeserializeRefreshState(record.Value);
+            if (state is null || state.ExpiresAt <= now || currentUser is null ||
+                !string.Equals(state.SecurityStamp, currentUser.SecurityStamp, StringComparison.Ordinal))
+            {
+                expired.Add(record);
+                continue;
+            }
+            sessions.Add(new MobileSessionDescriptor(
+                record.Name!,
+                state.DeviceName,
+                state.CreatedAt,
+                state.LastUsedAt,
+                state.ExpiresAt,
+                string.Equals(record.Name, currentSessionId, StringComparison.Ordinal)));
+        }
+        if (expired.Count > 0)
+        {
+            database.UserTokens.RemoveRange(expired);
+            await database.SaveChangesAsync(cancellationToken);
+        }
+        return Ok(sessions.OrderByDescending(session => session.LastUsedAt));
+    }
+
+    /// <summary>Revoke one of the current user's app sessions after confirming their password.</summary>
+    [HttpDelete("mobile-sessions/{sessionId}")]
+    public async Task<IActionResult> RevokeMobileSession(
+        string sessionId,
+        RevokeMobileSessionRequest request,
+        CancellationToken cancellationToken)
+    {
+        var userId = User.FindFirstValue(JwtRegisteredClaimNames.Sub);
+        var user = userId is null ? null : await users.FindByIdAsync(userId);
+        if (user is null) return Unauthorized();
+        if (string.IsNullOrWhiteSpace(request.CurrentPassword) ||
+            !await users.CheckPasswordAsync(user, request.CurrentPassword))
+            return Unauthorized(new { error = "The current password was not accepted." });
+
+        var record = await database.UserTokens.SingleOrDefaultAsync(token =>
+            token.UserId == user.Id &&
+            token.LoginProvider == MobileSessionTokenProvider &&
+            token.Name == sessionId, cancellationToken);
+        if (record is null) return NotFound();
+
+        database.UserTokens.Remove(record);
+        await database.SaveChangesAsync(cancellationToken);
+        return NoContent();
+    }
+
+    /// <summary>The app revokes its own session when a saved server connection is removed.</summary>
+    [HttpPost("mobile-sessions/revoke")]
+    [AllowAnonymous]
+    public async Task<IActionResult> RevokeCurrentMobileSession(MobileRefreshRequest request, CancellationToken cancellationToken)
+    {
+        var found = await FindMobileRefreshSessionAsync(request.RefreshToken, cancellationToken);
+        if (found is null) return NoContent();
+
+        var (record, state, _, secret) = found.Value;
+        if (!RefreshSecretMatches(secret, state.SecretHash)) return NoContent();
+        database.UserTokens.Remove(record);
+        await database.SaveChangesAsync(cancellationToken);
+        return NoContent();
     }
 
     [HttpPost("forgot-password")]
@@ -213,7 +372,132 @@ public sealed class AuthController(
         return Ok(new { message = "Password changed. Other sessions have been signed out." });
     }
 
+    private (string AccessToken, DateTime ExpiresAt) CreateAccessToken(
+        AppUser user,
+        DateTime expiresAt,
+        string? mobileSessionId = null)
+    {
+        var claims = new List<Claim>
+        {
+            new(JwtRegisteredClaimNames.Sub, user.Id),
+            new(JwtRegisteredClaimNames.Email, user.Email ?? user.UserName ?? ""),
+            new(JwtRegisteredClaimNames.Jti, Guid.NewGuid().ToString()),
+            new("security_stamp", user.SecurityStamp ?? ""),
+        };
+        if (mobileSessionId is not null)
+            claims.Add(new Claim("mobile_session_id", mobileSessionId));
+        claims.AddRange(user.GetScopes().Select(scope => new Claim("scope", scope)));
+
+        var credentials = new SigningCredentials(tokenConfiguration.SigningKey, SecurityAlgorithms.HmacSha256);
+        var jwt = new JwtSecurityToken(
+            tokenConfiguration.Issuer,
+            tokenConfiguration.Issuer,
+            claims,
+            expires: expiresAt,
+            signingCredentials: credentials);
+        return (new JwtSecurityTokenHandler().WriteToken(jwt), expiresAt);
+    }
+
+    private async Task<(IdentityUserToken<string> Record, MobileRefreshTokenState State, AppUser User, string Secret)?>
+        FindMobileRefreshSessionAsync(string? token, CancellationToken cancellationToken)
+    {
+        var parsed = ParseRefreshToken(token);
+        if (parsed is null) return null;
+
+        var record = await database.UserTokens.SingleOrDefaultAsync(item =>
+            item.LoginProvider == MobileSessionTokenProvider && item.Name == parsed.Value.SessionId,
+            cancellationToken);
+        if (record is null) return null;
+
+        var state = DeserializeRefreshState(record.Value);
+        var user = await users.FindByIdAsync(record.UserId);
+        if (state is null || state.ExpiresAt <= DateTimeOffset.UtcNow || user is null ||
+            !user.IsActive || user.DeletedAt is not null ||
+            !string.Equals(user.SecurityStamp, state.SecurityStamp, StringComparison.Ordinal))
+        {
+            database.UserTokens.Remove(record);
+            await database.SaveChangesAsync(cancellationToken);
+            return null;
+        }
+
+        return (record, state, user, parsed.Value.Secret);
+    }
+
+    private static (string SessionId, string Secret)? ParseRefreshToken(string? token)
+    {
+        if (string.IsNullOrWhiteSpace(token)) return null;
+        var separator = token.IndexOf('.');
+        if (separator <= 0 || separator == token.Length - 1) return null;
+        var sessionId = token[..separator];
+        var secret = token[(separator + 1)..];
+        return Guid.TryParseExact(sessionId, "N", out _) && secret.Length >= 40
+            ? (sessionId, secret)
+            : null;
+    }
+
+    private static (string Token, string Secret) CreateRefreshToken(string sessionId)
+    {
+        var secret = WebEncoders.Base64UrlEncode(RandomNumberGenerator.GetBytes(32));
+        return ($"{sessionId}.{secret}", secret);
+    }
+
+    private static string HashRefreshSecret(string secret) =>
+        Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(secret)));
+
+    private static bool RefreshSecretMatches(string secret, string expectedHash)
+    {
+        try
+        {
+            var expected = Convert.FromHexString(expectedHash);
+            var actual = SHA256.HashData(Encoding.UTF8.GetBytes(secret));
+            return CryptographicOperations.FixedTimeEquals(actual, expected);
+        }
+        catch (FormatException)
+        {
+            return false;
+        }
+    }
+
+    private static MobileRefreshTokenState? DeserializeRefreshState(string? serialized)
+    {
+        if (string.IsNullOrWhiteSpace(serialized)) return null;
+        try { return JsonSerializer.Deserialize<MobileRefreshTokenState>(serialized); }
+        catch (JsonException) { return null; }
+    }
+
+    private static string NormalizeDeviceName(string? value)
+    {
+        var safe = new string((value ?? "MediaPager Flutter").Where(character => !char.IsControl(character)).ToArray()).Trim();
+        if (safe.Length == 0) safe = "MediaPager Flutter";
+        return safe.Length <= 120 ? safe : safe[..120];
+    }
+
 }
+
+public sealed record MobileSessionLoginRequest(string Email, string Password, string? DeviceName = null);
+public sealed record MobileRefreshRequest(string RefreshToken);
+public sealed record RevokeMobileSessionRequest(string CurrentPassword);
+public sealed record MobileSessionTokenResponse(
+    string AccessToken,
+    string RefreshToken,
+    string SessionId,
+    DateTime AccessTokenExpiresAt,
+    DateTimeOffset RefreshTokenExpiresAt,
+    IReadOnlyCollection<string> Scopes);
+public sealed record MobileSessionDescriptor(
+    string Id,
+    string DeviceName,
+    DateTimeOffset CreatedAt,
+    DateTimeOffset LastUsedAt,
+    DateTimeOffset ExpiresAt,
+    bool IsCurrentDevice);
+public sealed record MobileRefreshTokenState(
+    string SecretHash,
+    string DeviceName,
+    DateTimeOffset CreatedAt,
+    DateTimeOffset LastUsedAt,
+    DateTimeOffset ExpiresAt,
+    string SecurityStamp);
 
 public sealed record LoginRequest(string Email, string Password);
 public sealed record EmailRequest(string Email);
