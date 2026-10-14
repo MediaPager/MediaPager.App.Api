@@ -276,11 +276,25 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
             {
                 var userId = context.Principal?.FindFirstValue(System.IdentityModel.Tokens.Jwt.JwtRegisteredClaimNames.Sub);
                 var securityStamp = context.Principal?.FindFirstValue("security_stamp");
+                var mobileSessionId = context.Principal?.FindFirstValue("mobile_session_id");
                 var userManager = context.HttpContext.RequestServices.GetRequiredService<UserManager<AppUser>>();
                 var user = userId is null ? null : await userManager.FindByIdAsync(userId);
                 if (user is null || !user.IsActive || user.DeletedAt is not null ||
                     !string.Equals(user.SecurityStamp, securityStamp, StringComparison.Ordinal))
+                {
                     context.Fail("The account session is no longer valid.");
+                    return;
+                }
+
+                if (mobileSessionId is not null)
+                {
+                    var database = context.HttpContext.RequestServices.GetRequiredService<AuthDbContext>();
+                    var activeSession = await database.UserTokens.AsNoTracking().AnyAsync(token =>
+                        token.UserId == user.Id &&
+                        token.LoginProvider == AuthController.MobileSessionTokenProvider &&
+                        token.Name == mobileSessionId);
+                    if (!activeSession) context.Fail("The mobile device session was revoked.");
+                }
             },
         };
     });
