@@ -89,6 +89,8 @@ public sealed class FfmpegMediaToolBroker(
             throw new ArgumentOutOfRangeException(nameof(request), "A destination catalog is required.");
         if (!Enum.IsDefined(request.Profile))
             throw new ArgumentOutOfRangeException(nameof(request), "The requested transcode profile is not supported.");
+        if (request.Kind == MediaKind.Document)
+            throw new InvalidOperationException("Document files cannot be processed by the media transfer tool.");
         await bootstrapState.WaitAsync(cancellationToken);
         if (!await StreamingService.IsSafeStreamUri(request.SourceUri, cancellationToken))
             throw new InvalidOperationException("The media source must be a public HTTPS URL.");
@@ -365,6 +367,7 @@ public sealed class FfmpegMediaToolBroker(
         MediaKind.Podcast => "podcasts",
         MediaKind.Audiobook => "audiobooks",
         MediaKind.Book => "books",
+        MediaKind.Document => "docs",
         _ => null,
     };
 

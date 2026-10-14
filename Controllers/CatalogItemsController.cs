@@ -26,6 +26,8 @@ public sealed class CatalogItemsController(
         { ".mp3", ".m4a", ".m4b", ".aac", ".flac", ".ogg", ".oga", ".wav", ".opus", ".wma" };
     private static readonly HashSet<string> BookExtensions = new(StringComparer.OrdinalIgnoreCase)
         { ".pdf", ".epub", ".mobi", ".azw", ".azw3", ".cbz", ".cbr", ".txt", ".rtf" };
+    private static readonly HashSet<string> DocumentExtensions = new(StringComparer.OrdinalIgnoreCase)
+        { ".pdf", ".doc", ".docx", ".odt", ".rtf", ".txt", ".md", ".csv", ".xls", ".xlsx", ".ppt", ".pptx", ".odp", ".ods" };
 
     // GET /catalog-items — library entries for the catalog tabs. Filter by catalog,
     // kind, or external id (playback uses externalId to find a local copy of a TMDB movie).
@@ -215,6 +217,7 @@ public sealed class CatalogItemsController(
             case "podcasts": (kind, allowedExtensions) = ("podcast", AudioExtensions); break;
             case "audiobooks": (kind, allowedExtensions) = ("audiobook", AudioExtensions); break;
             case "books": (kind, allowedExtensions) = ("book", BookExtensions); break;
+            case "docs": (kind, allowedExtensions) = ("document", DocumentExtensions); break;
             default: (kind, allowedExtensions) = (null, null); break;
         }
         if (kind is null || allowedExtensions is null)
@@ -989,6 +992,20 @@ public sealed class CatalogItemsController(
         ".wav" => "audio/wav",
         ".ogg" or ".oga" or ".opus" => "audio/ogg",
         ".wma" => "audio/x-ms-wma",
+        ".pdf" => "application/pdf",
+        ".doc" => "application/msword",
+        ".docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        ".odt" => "application/vnd.oasis.opendocument.text",
+        ".rtf" => "application/rtf",
+        ".txt" => "text/plain",
+        ".md" => "text/markdown",
+        ".csv" => "text/csv",
+        ".xls" => "application/vnd.ms-excel",
+        ".xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        ".ppt" => "application/vnd.ms-powerpoint",
+        ".pptx" => "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        ".odp" => "application/vnd.oasis.opendocument.presentation",
+        ".ods" => "application/vnd.oasis.opendocument.spreadsheet",
         _ => "application/octet-stream",
     };
 

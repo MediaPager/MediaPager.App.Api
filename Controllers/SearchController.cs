@@ -12,13 +12,20 @@ public sealed class SearchController(PluginRegistry registry) : ControllerBase
 {
     // GET /search?q=&limit=5 — top N matches fused across all search providers.
     [HttpGet]
-    public async Task<IActionResult> UnifiedSearch([FromQuery] string? q, [FromQuery] int limit = 5, CancellationToken cancellationToken = default)
+    public async Task<IActionResult> UnifiedSearch(
+        [FromQuery] string? q,
+        [FromQuery] int limit = 5,
+        [FromQuery] string? mediaTypeSlug = null,
+        [FromQuery] string? catalogTypeSlug = null,
+        CancellationToken cancellationToken = default)
     {
         var query = (q ?? "").Trim();
         if (query.Length == 0)
             return Ok(new List<SearchHit>());
 
         var resultLimit = Math.Clamp(limit, 1, 10);
+        mediaTypeSlug = NormalizeScope(mediaTypeSlug);
+        catalogTypeSlug = NormalizeScope(catalogTypeSlug);
         var supportedStreamKinds = registry.ResolveAll<IStreamProviderPlugin>()
             .Where(provider => provider.Mode == StreamProviderMode.Online)
             .SelectMany(provider => provider.SupportedKinds)
@@ -30,7 +37,7 @@ public sealed class SearchController(PluginRegistry registry) : ControllerBase
             try
             {
                 return await provider.SearchAsync(
-                    new SearchRequest(query, resultLimit, supportedStreamKinds), cancellationToken);
+                    new SearchRequest(query, resultLimit, supportedStreamKinds, mediaTypeSlug, catalogTypeSlug), cancellationToken);
             }
             catch
             {
@@ -40,7 +47,9 @@ public sealed class SearchController(PluginRegistry registry) : ControllerBase
 
         await Task.WhenAll(tasks);
 
-        var providerHits = tasks.SelectMany(task => task.Result).ToList();
+        var providerHits = tasks.SelectMany(task => task.Result)
+            .Where(hit => MatchesScope(hit, mediaTypeSlug, catalogTypeSlug))
+            .ToList();
         var localHits = providerHits
             .Where(hit => hit.CatalogItemId is not null)
             .OrderByDescending(hit => hit.VoteAverage ?? 0)
@@ -89,4 +98,25 @@ public sealed class SearchController(PluginRegistry registry) : ControllerBase
 
     private static string NormalizeTitle(string title) =>
         string.Concat(title.Where(char.IsLetterOrDigit)).ToUpperInvariant();
+
+    private static bool MatchesScope(ProviderSearchHit hit, string? mediaTypeSlug, string? catalogTypeSlug)
+    {
+        if (catalogTypeSlug is not null &&
+            !string.Equals(hit.Kind.ToCatalogTypeSlug(), catalogTypeSlug, StringComparison.OrdinalIgnoreCase))
+            return false;
+
+        if (mediaTypeSlug is null) return true;
+        var hitMediaType = hit.Kind switch
+        {
+            MediaKind.Movie or MediaKind.Tv => "video",
+            MediaKind.Music or MediaKind.Podcast or MediaKind.Audiobook => "audio",
+            MediaKind.Book => "book",
+            MediaKind.Document => "documents",
+            _ => "",
+        };
+        return string.Equals(hitMediaType, mediaTypeSlug, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string? NormalizeScope(string? value) =>
+        string.IsNullOrWhiteSpace(value) ? null : value.Trim().ToLowerInvariant();
 }
