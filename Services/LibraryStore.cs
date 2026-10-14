@@ -109,6 +109,7 @@ public sealed class LibraryStore(IServiceScopeFactory scopeFactory) : ILibrarySt
                 MediaKind.Podcast => "podcast",
                 MediaKind.Audiobook => "audiobook",
                 MediaKind.Book => "book",
+                MediaKind.Document => "document",
                 _ => catalog.CatalogType.Slug,
             },
             ExternalId = request.ExternalId,
@@ -437,6 +438,7 @@ public sealed class LibraryStore(IServiceScopeFactory scopeFactory) : ILibrarySt
             MediaKind.Podcast => "podcasts",
             MediaKind.Audiobook => "audiobooks",
             MediaKind.Book => "books",
+            MediaKind.Document => "docs",
             _ => null,
         };
         if (slug is null) return null;

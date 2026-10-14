@@ -316,12 +316,23 @@ builder.Services.AddSingleton<IPluginSettingsRepository, PluginSettingsService>(
 builder.Services.AddSingleton<ManagedToolDirectory>();
 builder.Services.AddSingleton<ManagedToolsBootstrapState>();
 builder.Services.AddHttpClient<FfmpegToolInstaller>(client => client.Timeout = Timeout.InfiniteTimeSpan);
+builder.Services.AddHttpClient(nameof(DocumentToolsetInstaller), (services, client) =>
+{
+    client.Timeout = Timeout.InfiniteTimeSpan;
+    client.DefaultRequestHeaders.UserAgent.ParseAdd("MediaPager/1.0");
+    client.DefaultRequestHeaders.Accept.ParseAdd("application/vnd.github+json");
+    var token = services.GetRequiredService<IConfiguration>()["GitHubToken"];
+    if (!string.IsNullOrWhiteSpace(token))
+        client.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token);
+});
 builder.Services.AddHttpClient<ManagedPluginBuildSdkProvider>(client => client.Timeout = Timeout.InfiniteTimeSpan);
 builder.Services.AddSingleton<IPluginBuildSdkProvider>(services =>
     services.GetRequiredService<ManagedPluginBuildSdkProvider>());
 builder.Services.AddSingleton<PlaywrightBrowserInstaller>();
 builder.Services.AddSingleton<ManagedToolsProvisioner>();
 builder.Services.AddHostedService<ManagedToolsBootstrapService>();
+builder.Services.AddSingleton<DocumentToolsetInstaller>();
+builder.Services.AddHostedService<DocumentToolsBootstrapService>();
 builder.Services.AddSingleton<IBrowserAutomationBroker, PlaywrightBrowserAutomationBroker>();
 builder.Services.AddSingleton<IPluginWorkerFactory, PluginWorkerFactory>();
 builder.Services.AddSingleton<PluginDeployer>();
@@ -393,6 +404,7 @@ await using (var scope = app.Services.CreateAsyncScope())
             new MediaType { Name = "Video", Slug = "video", Description = "Moving picture content (movies, TV shows)." },
             new MediaType { Name = "Audio", Slug = "audio", Description = "Audio-only content (music, podcasts, audiobooks)." },
             new MediaType { Name = "Book", Slug = "book", Description = "Written content (PDF, EPUB, etc.)." },
+            new MediaType { Name = "Documents", Slug = "documents", Description = "Documents and office files." },
         };
         database.MediaTypes.AddRange(mediaTypes);
         await database.SaveChangesAsync();
@@ -404,9 +416,37 @@ await using (var scope = app.Services.CreateAsyncScope())
             new CatalogType { Name = "Music", Slug = "music", MediaTypeId = bySlug["audio"].Id },
             new CatalogType { Name = "Podcasts", Slug = "podcasts", MediaTypeId = bySlug["audio"].Id },
             new CatalogType { Name = "Audiobooks", Slug = "audiobooks", MediaTypeId = bySlug["audio"].Id },
-            new CatalogType { Name = "Books", Slug = "books", MediaTypeId = bySlug["book"].Id });
+            new CatalogType { Name = "Books", Slug = "books", MediaTypeId = bySlug["book"].Id },
+            new CatalogType { Name = "Docs", Slug = "docs", MediaTypeId = bySlug["documents"].Id });
         await database.SaveChangesAsync();
         app.Logger.LogInformation("Seeded catalog lookup tables.");
+    }
+
+    // Additive lookup seeding also upgrades existing databases that already have the original
+    // catalog types; the initial all-types seed above runs only on a blank lookup table.
+    var documentsMediaType = await database.MediaTypes
+        .FirstOrDefaultAsync(type => type.Slug == "documents");
+    if (documentsMediaType is null)
+    {
+        documentsMediaType = new MediaType
+        {
+            Name = "Documents",
+            Slug = "documents",
+            Description = "Documents and office files.",
+        };
+        database.MediaTypes.Add(documentsMediaType);
+        await database.SaveChangesAsync();
+    }
+    if (!await database.CatalogTypes.AnyAsync(type => type.Slug == "docs"))
+    {
+        database.CatalogTypes.Add(new CatalogType
+        {
+            Name = "Docs",
+            Slug = "docs",
+            MediaTypeId = documentsMediaType.Id,
+        });
+        await database.SaveChangesAsync();
+        app.Logger.LogInformation("Seeded Docs catalog type and Documents media type.");
     }
 
     var users = scope.ServiceProvider.GetRequiredService<UserManager<AppUser>>();
