@@ -98,27 +98,28 @@ if (string.IsNullOrWhiteSpace(configuredConnectionString))
     configuredConnectionString = Environment.GetEnvironmentVariable("MEDIAPAGER_ConnectionStrings__AuthDatabase");
 if (string.IsNullOrWhiteSpace(configuredConnectionString))
 {
-    var configuredDbHost = SettingsConfigurationKeys.ReadConfiguredValue(builder.Configuration, SettingsConfigurationKeys.DbHost);
-    if (!string.IsNullOrWhiteSpace(configuredDbHost))
+    if (databaseProvider is "postgres" or "postgresql")
     {
-        var postgres = new Npgsql.NpgsqlConnectionStringBuilder
+        var configuredDbHost = SettingsConfigurationKeys.ReadConfiguredValue(builder.Configuration, SettingsConfigurationKeys.DbHost);
+        if (!string.IsNullOrWhiteSpace(configuredDbHost))
         {
-            Host = configuredDbHost,
-            Port = int.TryParse(SettingsConfigurationKeys.ReadConfiguredValue(builder.Configuration, SettingsConfigurationKeys.DbPort), out var port) ? port : 5432,
-            Database = SettingsConfigurationKeys.ReadConfiguredValue(builder.Configuration, SettingsConfigurationKeys.DbCatalog) ?? "mediapager",
-            Username = SettingsConfigurationKeys.ReadConfiguredValue(builder.Configuration, SettingsConfigurationKeys.DbUser) ?? "mediapager",
-            Password = SettingsConfigurationKeys.ReadConfiguredValue(builder.Configuration, SettingsConfigurationKeys.DbPassword) ?? "",
-            Timeout = int.TryParse(SettingsConfigurationKeys.ReadConfiguredValue(builder.Configuration, SettingsConfigurationKeys.DbConnectionTimeout), out var timeout) ? timeout : 15,
-        };
-        var configuredSslMode = SettingsConfigurationKeys.ReadConfiguredValue(builder.Configuration, SettingsConfigurationKeys.DbSslMode);
-        if (!string.IsNullOrWhiteSpace(configuredSslMode) && Enum.TryParse<Npgsql.SslMode>(configuredSslMode, true, out var parsedSslMode))
-            postgres.SslMode = parsedSslMode;
-        configuredConnectionString = postgres.ConnectionString;
+            var postgres = new Npgsql.NpgsqlConnectionStringBuilder
+            {
+                Host = configuredDbHost,
+                Port = int.TryParse(SettingsConfigurationKeys.ReadConfiguredValue(builder.Configuration, SettingsConfigurationKeys.DbPort), out var port) ? port : 5432,
+                Database = SettingsConfigurationKeys.ReadConfiguredValue(builder.Configuration, SettingsConfigurationKeys.DbCatalog) ?? "mediapager",
+                Username = SettingsConfigurationKeys.ReadConfiguredValue(builder.Configuration, SettingsConfigurationKeys.DbUser) ?? "mediapager",
+                Password = SettingsConfigurationKeys.ReadConfiguredValue(builder.Configuration, SettingsConfigurationKeys.DbPassword) ?? "",
+                Timeout = int.TryParse(SettingsConfigurationKeys.ReadConfiguredValue(builder.Configuration, SettingsConfigurationKeys.DbConnectionTimeout), out var timeout) ? timeout : 15,
+            };
+            var configuredSslMode = SettingsConfigurationKeys.ReadConfiguredValue(builder.Configuration, SettingsConfigurationKeys.DbSslMode);
+            if (!string.IsNullOrWhiteSpace(configuredSslMode) && Enum.TryParse<Npgsql.SslMode>(configuredSslMode, true, out var parsedSslMode))
+                postgres.SslMode = parsedSslMode;
+            configuredConnectionString = postgres.ConnectionString;
+        }
     }
-    else
-    {
+    if (string.IsNullOrWhiteSpace(configuredConnectionString))
         configuredConnectionString = builder.Configuration.GetConnectionString("AuthDatabase");
-    }
 }
 var persistentDataDirectory = storageLayout.DataRoot;
 Directory.CreateDirectory(persistentDataDirectory);
