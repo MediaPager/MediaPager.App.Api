@@ -53,7 +53,7 @@ Directory.CreateDirectory(bootstrapStorageLayout.ConfigDirectory);
 var runtimeAppSettingsPath = Path.Combine(bootstrapStorageLayout.ConfigDirectory, "appsettings.json");
 if (!File.Exists(runtimeAppSettingsPath))
     File.Copy(sourceAppSettingsPath, runtimeAppSettingsPath);
-MigrateLegacyPluginSettings(runtimeAppSettingsPath);
+MigrateLegacyPluginSettings(runtimeAppSettingsPath, sourceAppSettingsPath);
 var runtimeCommunityPluginsPath = Path.Combine(bootstrapStorageLayout.ConfigDirectory, "plugins.community.json");
 if (!File.Exists(runtimeCommunityPluginsPath))
 {
@@ -314,6 +314,7 @@ builder.Services.AddAuthorization(options =>
 });
 
 builder.Services.AddScoped<EmailSender>();
+builder.Services.AddSingleton<IPluginEmailSender, PluginEmailSender>();
 builder.Services.AddScoped<IRuntimeSettings, RuntimeSettingsService>();
 builder.Services.AddSingleton(scopeSecurityCatalog);
 builder.Services.AddScoped<GitSshPrivateKeyStore>();
@@ -579,7 +580,7 @@ _ = scopeSecurityCatalog.ScopesFor(officialPlugins.Concat(communityPlugins));
 
 app.Run();
 
-static void MigrateLegacyPluginSettings(string appSettingsPath)
+static void MigrateLegacyPluginSettings(string appSettingsPath, string defaultsAppSettingsPath)
 {
     var text = File.ReadAllText(appSettingsPath);
     var root = System.Text.Json.Nodes.JsonNode.Parse(
@@ -588,18 +589,70 @@ static void MigrateLegacyPluginSettings(string appSettingsPath)
         new System.Text.Json.JsonDocumentOptions { CommentHandling = System.Text.Json.JsonCommentHandling.Skip, AllowTrailingCommas = true })
         as System.Text.Json.Nodes.JsonObject;
     if (root is null) return;
+
+    var changed = false;
+    var settings = root["Settings"] as System.Text.Json.Nodes.JsonObject;
+    var settingsPlugins = settings?["Plugins"] as System.Text.Json.Nodes.JsonObject;
+    if (settingsPlugins?["Required"] is System.Text.Json.Nodes.JsonArray flatRequired)
+    {
+        // A previous official-plugin toggle wrote Required as one flat array instead of
+        // Required:Official. Restore the shipped defaults and merge the explicitly enabled
+        // ids so restarting the API doesn't silently turn an official plugin back off.
+        System.Text.Json.Nodes.JsonObject? defaults = null;
+        if (File.Exists(defaultsAppSettingsPath))
+            defaults = System.Text.Json.Nodes.JsonNode.Parse(
+                File.ReadAllText(defaultsAppSettingsPath),
+                nodeOptions: null,
+                new System.Text.Json.JsonDocumentOptions { CommentHandling = System.Text.Json.JsonCommentHandling.Skip, AllowTrailingCommas = true })
+                as System.Text.Json.Nodes.JsonObject;
+        var defaultsRequired = defaults?["Settings"]?["Plugins"]?["Required"] as System.Text.Json.Nodes.JsonObject;
+        var official = CopyStringArray(defaultsRequired?["Official"]);
+        var community = CopyStringArray(defaultsRequired?["Community"]);
+        foreach (var node in flatRequired)
+        {
+            if (node is not System.Text.Json.Nodes.JsonValue value || !value.TryGetValue<string>(out var id) ||
+                string.IsNullOrWhiteSpace(id)) continue;
+            if (!ContainsId(official, id)) official.Add(id);
+        }
+
+        settings ??= new System.Text.Json.Nodes.JsonObject();
+        root["Settings"] = settings;
+        settingsPlugins ??= new System.Text.Json.Nodes.JsonObject();
+        settings["Plugins"] = settingsPlugins;
+        settingsPlugins["Required"] = new System.Text.Json.Nodes.JsonObject
+        {
+            ["Official"] = official,
+            ["Community"] = community,
+        };
+        changed = true;
+    }
+
     var plugins = root["Plugins"] as System.Text.Json.Nodes.JsonObject;
     var legacyRequired = plugins?["Required"] as System.Text.Json.Nodes.JsonObject;
-    if (legacyRequired is null) return;
-    var settings = root["Settings"] as System.Text.Json.Nodes.JsonObject ?? new System.Text.Json.Nodes.JsonObject();
-    root["Settings"] = settings;
-    var settingsPlugins = settings["Plugins"] as System.Text.Json.Nodes.JsonObject ?? new System.Text.Json.Nodes.JsonObject();
-    settings["Plugins"] = settingsPlugins;
-    if (settingsPlugins["Required"] is null)
-        settingsPlugins["Required"] = legacyRequired.DeepClone();
-    plugins!.Remove("Required");
-    if (plugins.Count == 0) root.Remove("Plugins");
+    if (legacyRequired is not null)
+    {
+        settings ??= new System.Text.Json.Nodes.JsonObject();
+        root["Settings"] = settings;
+        settingsPlugins = settings["Plugins"] as System.Text.Json.Nodes.JsonObject ?? new System.Text.Json.Nodes.JsonObject();
+        settings["Plugins"] = settingsPlugins;
+        if (settingsPlugins["Required"] is null)
+            settingsPlugins["Required"] = legacyRequired.DeepClone();
+        plugins!.Remove("Required");
+        if (plugins.Count == 0) root.Remove("Plugins");
+        changed = true;
+    }
+
+    if (!changed) return;
     var temp = $"{appSettingsPath}.{Guid.NewGuid():N}.tmp";
     File.WriteAllText(temp, root.ToJsonString(new System.Text.Json.JsonSerializerOptions { WriteIndented = true }) + Environment.NewLine);
     File.Move(temp, appSettingsPath, overwrite: true);
+
+    static System.Text.Json.Nodes.JsonArray CopyStringArray(System.Text.Json.Nodes.JsonNode? node) =>
+        node is System.Text.Json.Nodes.JsonArray array
+            ? (System.Text.Json.Nodes.JsonArray)array.DeepClone()
+            : new System.Text.Json.Nodes.JsonArray();
+
+    static bool ContainsId(System.Text.Json.Nodes.JsonArray array, string id) => array.Any(node =>
+        node is System.Text.Json.Nodes.JsonValue value && value.TryGetValue<string>(out var existing) &&
+        string.Equals(existing, id, StringComparison.OrdinalIgnoreCase));
 }

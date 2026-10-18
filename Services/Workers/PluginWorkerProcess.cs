@@ -20,6 +20,7 @@ internal sealed class PluginWorkerProcess : IDisposable
     private readonly IPluginActivity _activity;
     private readonly IBrowserAutomationBroker _browser;
     private readonly IMediaToolBroker _mediaTools;
+    private readonly IPluginEmailSender? _emailSender;
     private readonly IReadOnlySet<string> _hostCapabilities;
     private readonly Action<string> _cancelHostJob;
     private readonly ILogger _logger;
@@ -47,6 +48,7 @@ internal sealed class PluginWorkerProcess : IDisposable
         IPluginActivity activity,
         IBrowserAutomationBroker browser,
         IMediaToolBroker mediaTools,
+        IPluginEmailSender? emailSender,
         IReadOnlySet<string> hostCapabilities,
         Action<string> cancelHostJob,
         ILogger logger)
@@ -57,6 +59,7 @@ internal sealed class PluginWorkerProcess : IDisposable
         _activity = activity;
         _browser = browser;
         _mediaTools = mediaTools;
+        _emailSender = emailSender;
         _hostCapabilities = new HashSet<string>(hostCapabilities, StringComparer.OrdinalIgnoreCase);
         _cancelHostJob = cancelHostJob;
         _logger = logger;
@@ -275,6 +278,15 @@ internal sealed class PluginWorkerProcess : IDisposable
         if (message.Capability == "media.tools" &&
             _hostCapabilities.Contains(PluginHostCapabilityNames.MediaTools))
             return await DispatchMediaToolCallAsync(message, cancellationToken);
+
+        if (message.Capability == "email.sending" &&
+            _hostCapabilities.Contains(PluginHostCapabilityNames.EmailSending) && _emailSender is not null)
+        {
+            if (message.Operation != "send")
+                throw new PluginOperationException(new PluginError("plugin.email.operation", "Unsupported email operation."));
+            var request = PluginWorkerJson.Deserialize<PluginWorkerEmailArguments>(message.Arguments);
+            return PluginWorkerJson.ToElement(await _emailSender.SendAsync(request.Message, cancellationToken));
+        }
 
         throw new PluginOperationException(new PluginError("plugin.capability.denied", "The host did not grant this capability."));
     }

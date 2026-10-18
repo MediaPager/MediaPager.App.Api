@@ -287,12 +287,12 @@ public sealed class PluginJobsService(
     /// <summary>Add or remove an official id in Plugins:Required:Official (appsettings.json),
     /// then reload configuration so the checklist and catalog read see it immediately.</summary>
     public void SetOfficialRequired(string id, bool required)
-        => EditJsonFile("appsettings.json", AppSettingsPath(), "Settings", "Plugins", "Required", array =>
+        => EditJsonFile("appsettings.json", AppSettingsPath(), array =>
         {
             var index = IndexOf(array, id);
             if (required && index < 0) array.Add(id);
             if (!required && index >= 0) array.RemoveAt(index);
-        });
+        }, "Settings", "Plugins", "Required", "Official");
 
     private string AppSettingsPath()
     {
@@ -564,7 +564,7 @@ public sealed class PluginJobsService(
         bool discoverable = true)
     {
         var path = Path.Combine(storageLayout.ConfigDirectory, "plugins.community.json");
-        EditJsonFile("plugins.community.json", path, "Plugins", "List", "Community", array =>
+        EditJsonFile("plugins.community.json", path, array =>
         {
             foreach (var node in array)
             {
@@ -589,7 +589,7 @@ public sealed class PluginJobsService(
             if (!string.IsNullOrWhiteSpace(descriptor.Author))
                 created["author"] = descriptor.Author;
             array.Add(created);
-        });
+        }, "Plugins", "List", "Community");
     }
 
     private static string DeriveCategory(IMediaPagerPlugin plugin) => plugin switch
@@ -659,8 +659,10 @@ public sealed class PluginJobsService(
     // Read → mutate the JSON array at path (root → section keys → array) → write back
     // atomically → reload every configuration provider so ReadRequired/ReadCommunity and
     // the checklist see the new file immediately (the list files are load-once).
-    private void EditJsonFile(string fileName, string path, string rootKey, string sectionKey, string arrayKey, Action<JsonArray> mutate)
+    private void EditJsonFile(string fileName, string path, Action<JsonArray> mutate, params string[] pathSegments)
     {
+        if (pathSegments.Length == 0)
+            throw new ArgumentException("At least one JSON path segment is required.", nameof(pathSegments));
         FileWriteLock.Wait();
         try
         {
@@ -670,8 +672,24 @@ public sealed class PluginJobsService(
                 nodeOptions: null,
                 new JsonDocumentOptions { CommentHandling = JsonCommentHandling.Skip, AllowTrailingCommas = true })
                 as JsonObject ?? new JsonObject();
-            var section = EnsureObject(root, rootKey);
-            var nested = EnsureObject(section, sectionKey);
+            var nested = root;
+            for (var index = 0; index < pathSegments.Length - 1; index++)
+            {
+                var segment = pathSegments[index];
+                // Older builds accidentally wrote Required as a flat array while toggling an
+                // official plugin. Preserve those ids under Official before editing its list.
+                if (string.Equals(segment, "Required", StringComparison.Ordinal) &&
+                    nested[segment] is JsonArray legacyOfficial)
+                {
+                    nested[segment] = new JsonObject
+                    {
+                        ["Official"] = legacyOfficial.DeepClone(),
+                        ["Community"] = new JsonArray(),
+                    };
+                }
+                nested = EnsureObject(nested, segment);
+            }
+            var arrayKey = pathSegments[^1];
             var array = nested[arrayKey] as JsonArray ?? [];
             nested[arrayKey] = array;
             mutate(array);

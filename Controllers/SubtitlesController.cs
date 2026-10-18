@@ -8,7 +8,8 @@ namespace MediaPager.App.Api.Controllers;
 public sealed class SubtitlesController(
     IRuntimeSettings runtimeSettings,
     IPluginSettingsRepository pluginSettings,
-    PluginRegistry registry) : ControllerBase
+    PluginRegistry registry,
+    ILogger<SubtitlesController> logger) : ControllerBase
 {
     // GET /subtitles?tmdb=1377237&lang=en (or ?imdb=tt31349844 or ?query=movie%20title).
     // TV episodes: add &season=N&episode=N.
@@ -38,34 +39,55 @@ public sealed class SubtitlesController(
         if (season is not null && (season < 1 || episode < 1))
             return BadRequest(new { error = "Season and episode must be positive integers." });
 
-        var provider = await ActiveSubtitleProviderAsync(cancellationToken);
-        if (provider is null)
+        var providers = registry.ResolveAll<ISubtitleProviderPlugin>();
+        if (providers.Count == 0)
             return Problem("No subtitle provider is loaded. Install one from Settings → Plugins.",
                 statusCode: StatusCodes.Status503ServiceUnavailable);
 
-        try
+        var preferredProviderId = (await runtimeSettings.GetAsync(
+            RuntimeSettingKeys.SubtitlesProvider, cancellationToken))?.Trim();
+        var request = new SubtitleRequest((lang ?? "en").Trim(), imdb, tmdb, titleQuery, season, episode);
+        var searches = providers.Select(async (provider, index) =>
         {
-            var results = await provider.SearchAsync(new SubtitleRequest(
-                (lang ?? "en").Trim(), imdb, tmdb, titleQuery, season, episode), cancellationToken);
-            return Ok(results.Select(hit => new
+            try
             {
-                fileId = EncodeFileId(provider, hit.FileId),
+                var results = await provider.SearchAsync(request, cancellationToken);
+                return new SubtitleSearchOutcome(provider, index, results ?? [], Failed: false);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception exception)
+            {
+                logger.LogWarning("Subtitle provider {ProviderId} search failed ({ExceptionType}).",
+                    provider.Descriptor.Id, exception.GetType().Name);
+                return new SubtitleSearchOutcome(provider, index, [], Failed: true);
+            }
+        }).ToList();
+
+        var outcomes = await Task.WhenAll(searches);
+        if (outcomes.All(outcome => outcome.Failed))
+            return Problem("All loaded subtitle providers failed to search.",
+                statusCode: StatusCodes.Status502BadGateway);
+
+        var results = outcomes
+            .OrderBy(outcome => IsPreferredProvider(outcome.Provider, preferredProviderId) ? 0 : 1)
+            .ThenBy(outcome => outcome.Index)
+            .Where(outcome => !outcome.Failed)
+            .SelectMany(outcome => outcome.Results.Select(hit => new
+            {
+                fileId = EncodeFileId(outcome.Provider, hit.FileId),
+                providerId = outcome.Provider.Descriptor.Id,
+                providerName = outcome.Provider.Descriptor.Name,
                 fileName = hit.FileName,
                 release = hit.Release,
                 language = hit.Language,
                 hearingImpaired = hit.HearingImpaired,
                 popularity = hit.Popularity,
-            }));
-        }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-        {
-            throw;
-        }
-        catch (Exception exception)
-        {
-            return Problem($"{provider.Descriptor.Name} subtitle search failed: {exception.Message}",
-                statusCode: StatusCodes.Status502BadGateway);
-        }
+            }))
+            .ToList();
+        return Ok(results);
     }
 
     // GET /subtitles/file?id={fileId} — fetch provider-native content and convert SRT to
@@ -100,6 +122,17 @@ public sealed class SubtitlesController(
         }
     }
 
+    private sealed record SubtitleSearchOutcome(
+        ISubtitleProviderPlugin Provider,
+        int Index,
+        IReadOnlyList<SubtitleHit> Results,
+        bool Failed);
+
+    private static bool IsPreferredProvider(ISubtitleProviderPlugin provider, string? providerId) =>
+        !string.IsNullOrWhiteSpace(providerId) &&
+        (string.Equals(provider.Descriptor.Id, providerId, StringComparison.OrdinalIgnoreCase) ||
+         string.Equals(provider.Descriptor.Id.Split('.')[^1], providerId, StringComparison.OrdinalIgnoreCase));
+
     private async Task<ISubtitleProviderPlugin?> ActiveSubtitleProviderAsync(CancellationToken cancellationToken)
     {
         var providers = registry.ResolveAll<ISubtitleProviderPlugin>();
@@ -108,9 +141,7 @@ public sealed class SubtitlesController(
         var wanted = (await runtimeSettings.GetAsync(RuntimeSettingKeys.SubtitlesProvider, cancellationToken))?.Trim();
         if (!string.IsNullOrWhiteSpace(wanted))
         {
-            var selected = providers.FirstOrDefault(provider =>
-                string.Equals(provider.Descriptor.Id, wanted, StringComparison.OrdinalIgnoreCase) ||
-                string.Equals(provider.Descriptor.Id.Split('.')[^1], wanted, StringComparison.OrdinalIgnoreCase));
+            var selected = providers.FirstOrDefault(provider => IsPreferredProvider(provider, wanted));
             if (selected is not null) return selected;
         }
 

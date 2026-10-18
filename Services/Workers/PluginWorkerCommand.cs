@@ -470,6 +470,12 @@ internal sealed class WorkerPluginJob(PluginWorkerHostClient host, string id) : 
     }
 }
 
+internal sealed class WorkerPluginEmailSender(PluginWorkerHostClient host) : IPluginEmailSender
+{
+    public Task<bool> SendAsync(PluginEmailMessage message, CancellationToken cancellationToken = default) =>
+        host.CallHostAsync<bool>("email.sending", "send", new PluginWorkerEmailArguments(message), cancellationToken);
+}
+
 internal sealed class WorkerMediaToolBroker(PluginWorkerHostClient host) : IMediaToolBroker
 {
     public Task<bool> IsDestinationAvailableAsync(int catalogId, string catalogTypeSlug, CancellationToken cancellationToken = default) =>
@@ -507,6 +513,7 @@ internal sealed class PluginWorkerServiceProvider(
     private readonly IBrowserAutomationBroker _browser = new WorkerBrowserBroker(host);
     private readonly IPluginActivity _activity = host.Activity;
     private readonly IMediaToolBroker _mediaTools = host.MediaTools;
+    private readonly IPluginEmailSender _emailSender = new WorkerPluginEmailSender(host);
 
     public object? GetService(Type serviceType)
     {
@@ -516,6 +523,8 @@ internal sealed class PluginWorkerServiceProvider(
         if (serviceType == typeof(IPluginActivity)) return _activity;
         if (serviceType == typeof(IMediaToolBroker))
             return hostCapabilities.Contains(PluginHostCapabilityNames.MediaTools) ? _mediaTools : null;
+        if (serviceType == typeof(IPluginEmailSender))
+            return hostCapabilities.Contains(PluginHostCapabilityNames.EmailSending) ? _emailSender : null;
         if (serviceType == typeof(IServiceProvider)) return this;
         if (serviceType == typeof(IServiceProviderIsService)) return this;
         return null;
@@ -526,6 +535,7 @@ internal sealed class PluginWorkerServiceProvider(
         serviceType == typeof(IBrowserAutomationBroker) && hostCapabilities.Contains(PluginHostCapabilityNames.BrowserAutomation) ||
         serviceType == typeof(IPluginActivity) ||
         serviceType == typeof(IMediaToolBroker) && hostCapabilities.Contains(PluginHostCapabilityNames.MediaTools) ||
+        serviceType == typeof(IPluginEmailSender) && hostCapabilities.Contains(PluginHostCapabilityNames.EmailSending) ||
         serviceType == typeof(IServiceProvider) ||
         serviceType == typeof(IServiceProviderIsService);
 }

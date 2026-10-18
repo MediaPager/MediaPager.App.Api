@@ -92,8 +92,8 @@ dotnet user-secrets set "Auth:SigningKey" "$(openssl rand -base64 48)" --project
 - **TMDB:** `MEDIAPAGER_TMDB_API_KEY` supplies the TMDB plugin key when no value is saved
   in the plugin settings.
 - **`Settings:Site:BaseUrl`** (default `http://localhost:5173`) — used in invitation and
-  password-reset links. The Settings editor persists an override in the runtime database;
-  environment variables remain an explicit deployment override.
+  password-reset links. A value saved in the Settings editor takes precedence; environment
+  variables and configuration provide the fallback when no runtime override is saved.
 - **Storage:** MediaPager-managed writable files default below `Settings:Storage:Root`
   (`/data` in Docker; `~/.MediaPager` on macOS/Linux). Catalog media remains at each catalog's
   configured path.

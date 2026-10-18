@@ -234,12 +234,76 @@ public sealed class AuthController(
             return Ok(new { message = genericText, sent = false, debug = $"No account found for {address.Address}." });
 
         var resetToken = await users.GeneratePasswordResetTokenAsync(user);
-        var resetUrl = $"{frontendUri.GetLeftPart(UriPartial.Authority).TrimEnd('/')}/?mode=reset" +
-            $"&email={Uri.EscapeDataString(address.Address)}&token={Uri.EscapeDataString(resetToken)}";
+        var resetUrl = BuildFrontendAuthUrl(frontendUri, "reset", address.Address, resetToken);
+        var logoUrl = BuildFrontendAssetUrl(frontendUri, "mediapager-email-logo.png");
         var safeResetUrl = HtmlEncoder.Default.Encode(resetUrl);
-        var sent = await emailSender.SendAsync(address.Address, "Reset your MediaPager password",
-            $"Use this link to reset your MediaPager password. It expires shortly.\n\n{resetUrl}",
-            $"<p>Use this link to reset your MediaPager password. It expires shortly.</p><p><a href=\"{safeResetUrl}\">Reset password</a></p>",
+        var safeLogoUrl = HtmlEncoder.Default.Encode(logoUrl);
+        var resetText = $"""
+            MEDIA PAGER  |  ACCOUNT SECURITY
+
+            Let’s get you back in.
+
+            Hi {address.Address},
+
+            We received a request to reset the password for your MediaPager account. Use your private link below to choose a new one.
+
+            RESET MY PASSWORD
+            {resetUrl}
+
+            If you didn’t request a reset, you can ignore this email. Your password won’t change unless you use the link.
+
+            — The MediaPager team
+            """;
+        var resetHtml = $$"""
+            <!doctype html>
+            <html lang="en">
+            <head>
+                <meta charset="utf-8">
+                <meta name="viewport" content="width=device-width,initial-scale=1">
+                <meta name="x-apple-disable-message-reformatting">
+                <meta name="color-scheme" content="dark">
+                <meta name="supported-color-schemes" content="dark">
+                <title>Your MediaPager password reset link</title>
+            </head>
+            <body style="margin:0;padding:0;background:#070b14;font-family:Arial,Helvetica,sans-serif;color:#edf3fb">
+                <div style="display:none;font-size:1px;line-height:1px;color:#070b14;max-height:0;max-width:0;opacity:0;overflow:hidden">A private link to reset your MediaPager password.</div>
+                <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" bgcolor="#070b14" style="background:#070b14;padding:38px 12px">
+                    <tr><td align="center">
+                        <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="max-width:600px;background:#0e1525;border:1px solid #263348;border-radius:16px;overflow:hidden">
+                            <tr><td style="padding:0">
+                                <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0"><tr>
+                                    <td width="42%" height="4" bgcolor="#12d9f5" style="height:4px;background:#12d9f5;font-size:0;line-height:0">&nbsp;</td>
+                                    <td width="33%" height="4" bgcolor="#1686ff" style="height:4px;background:#1686ff;font-size:0;line-height:0">&nbsp;</td>
+                                    <td width="25%" height="4" bgcolor="#86d411" style="height:4px;background:#86d411;font-size:0;line-height:0">&nbsp;</td>
+                                </tr></table>
+                            </td></tr>
+                            <tr><td style="padding:30px 38px 0">
+                                <table role="presentation" cellspacing="0" cellpadding="0" border="0"><tr>
+                                    <td width="52" height="52" align="center" valign="middle"><img src="{{safeLogoUrl}}" width="52" height="52" alt="MediaPager" style="display:block;width:52px;height:52px;border:1px solid #263d58;border-radius:12px"></td>
+                                    <td style="padding-left:12px;color:#f1f5f9;font-size:14px;font-weight:bold;letter-spacing:2px">MEDIAPAGER</td>
+                                </tr></table>
+                            </td></tr>
+                            <tr><td style="padding:32px 38px 38px">
+                                <div style="display:inline-block;padding:7px 10px;border:1px solid #34532b;border-radius:999px;background:#142218;color:#a6e858;font-size:10px;font-weight:bold;letter-spacing:1.5px">ACCOUNT SECURITY</div>
+                                <h1 style="margin:18px 0 12px;color:#f7f9fc;font-size:32px;line-height:1.16;letter-spacing:-0.6px">Let’s get you back in.</h1>
+                                <p style="margin:0;color:#b8c5d8;font-size:16px;line-height:1.7">Hi {{HtmlEncoder.Default.Encode(address.Address)}}, we received a request to reset the password for your MediaPager account. Use your private link below to choose a new one.</p>
+                                <table role="presentation" cellspacing="0" cellpadding="0" border="0" style="margin-top:26px"><tr>
+                                    <td align="center" bgcolor="#86d411" style="border-radius:9px"><a href="{{safeResetUrl}}" style="display:inline-block;padding:15px 24px;color:#10170a;font-size:14px;font-weight:bold;text-decoration:none">Reset my password&nbsp;&nbsp; &#8594;</a></td>
+                                </tr></table>
+                                <p style="margin:25px 0 8px;color:#8fa2ba;font-size:12px;line-height:1.6">Button not working? Copy this private reset link into your browser:</p>
+                                <p style="margin:0;padding:12px 14px;background:#090f1b;border:1px solid #1e2a3d;border-radius:8px;color:#70cfff;font-size:12px;line-height:1.6;word-break:break-all"><a href="{{safeResetUrl}}" style="color:#70cfff;text-decoration:underline">{{safeResetUrl}}</a></p>
+                                <p style="margin:22px 0 0;color:#8fa2ba;font-size:12px;line-height:1.7">If you didn’t request a reset, you can ignore this email. Your password won’t change unless you use the link.</p>
+                            </td></tr>
+                            <tr><td style="padding:0 38px"><div style="height:1px;background:#202d41;font-size:0;line-height:0">&nbsp;</div></td></tr>
+                            <tr><td style="padding:19px 38px 25px;color:#697b94;font-size:11px;line-height:1.6">Sent by MediaPager · Keeping your library secure.</td></tr>
+                        </table>
+                    </td></tr>
+                </table>
+            </body>
+            </html>
+            """;
+        var sent = await emailSender.SendAsync(address.Address, "Your MediaPager password reset link",
+            resetText, resetHtml,
             cancellationToken);
         if (!sent)
         {
@@ -312,13 +376,90 @@ public sealed class AuthController(
         database.RegistrationInvites.Add(invite);
         await database.SaveChangesAsync(cancellationToken);
 
-        var inviteUrl = $"{frontendUri.GetLeftPart(UriPartial.Authority).TrimEnd('/')}/?mode=register" +
-            $"&email={Uri.EscapeDataString(address.Address)}&token={Uri.EscapeDataString(token)}";
+        var inviteUrl = BuildFrontendAuthUrl(frontendUri, "register", address.Address, token);
+        var logoUrl = BuildFrontendAssetUrl(frontendUri, "mediapager-email-logo.png");
         var safeInviteUrl = HtmlEncoder.Default.Encode(inviteUrl);
-        var sent = await emailSender.SendAsync(address.Address, "Your MediaPager invitation",
-            $"You have been invited to MediaPager. This link expires in 24 hours.\n\n{inviteUrl}",
-            $"<p>You have been invited to MediaPager. This link expires in 24 hours.</p><p><a href=\"{safeInviteUrl}\">Accept invitation</a></p>",
-            cancellationToken);
+        var safeInviteEmail = HtmlEncoder.Default.Encode(address.Address);
+        var safeLogoUrl = HtmlEncoder.Default.Encode(logoUrl);
+        var inviteText = $"""
+            MEDIA PAGER  |  YOU'RE INVITED
+
+            Your next movie night starts here.
+
+            Hi {address.Address},
+
+            You’ve been invited to join a shared MediaPager library. Accept the invitation below to create your account and start watching together.
+
+            JOIN THE LIBRARY
+            {inviteUrl}
+
+            INVITATION DETAILS
+            Invited account: {address.Address}
+            Link expires: 24 hours from when it was sent
+
+            This invitation is private to you and can only be used once. If you weren’t expecting it, you can ignore this message. No account will be created unless you accept.
+
+            — The MediaPager team
+            """;
+        var inviteHtml = $$"""
+            <!doctype html>
+            <html lang="en">
+            <head>
+                <meta charset="utf-8">
+                <meta name="viewport" content="width=device-width,initial-scale=1">
+                <meta name="x-apple-disable-message-reformatting">
+                <meta name="color-scheme" content="dark">
+                <meta name="supported-color-schemes" content="dark">
+                <title>A MediaPager library is waiting for you</title>
+            </head>
+            <body style="margin:0;padding:0;background:#070b14;font-family:Arial,Helvetica,sans-serif;color:#edf3fb">
+                <div style="display:none;font-size:1px;line-height:1px;color:#070b14;max-height:0;max-width:0;opacity:0;overflow:hidden">You’ve been invited to join a shared MediaPager library. Your invitation expires in 24 hours.</div>
+                <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" bgcolor="#070b14" style="background:#070b14;padding:38px 12px">
+                    <tr><td align="center">
+                        <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="max-width:600px;background:#0e1525;border:1px solid #263348;border-radius:16px;overflow:hidden">
+                            <tr><td style="padding:0">
+                                <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0"><tr>
+                                    <td width="42%" height="4" bgcolor="#12d9f5" style="height:4px;background:#12d9f5;font-size:0;line-height:0">&nbsp;</td>
+                                    <td width="33%" height="4" bgcolor="#1686ff" style="height:4px;background:#1686ff;font-size:0;line-height:0">&nbsp;</td>
+                                    <td width="25%" height="4" bgcolor="#86d411" style="height:4px;background:#86d411;font-size:0;line-height:0">&nbsp;</td>
+                                </tr></table>
+                            </td></tr>
+                            <tr><td style="padding:30px 38px 0">
+                                <table role="presentation" cellspacing="0" cellpadding="0" border="0"><tr>
+                                    <td width="52" height="52" align="center" valign="middle"><img src="{{safeLogoUrl}}" width="52" height="52" alt="MediaPager" style="display:block;width:52px;height:52px;border:1px solid #263d58;border-radius:12px"></td>
+                                    <td style="padding-left:12px;color:#f1f5f9;font-size:14px;font-weight:bold;letter-spacing:2px">MEDIAPAGER</td>
+                                </tr></table>
+                            </td></tr>
+                            <tr><td style="padding:32px 38px 38px">
+                                <div style="display:inline-block;padding:7px 10px;border:1px solid #34532b;border-radius:999px;background:#142218;color:#a6e858;font-size:10px;font-weight:bold;letter-spacing:1.5px">YOU'RE INVITED</div>
+                                <h1 style="margin:18px 0 12px;color:#f7f9fc;font-size:32px;line-height:1.16;letter-spacing:-0.6px">Your next movie night starts here.</h1>
+                                <p style="margin:0;color:#b8c5d8;font-size:16px;line-height:1.7">Hi {{safeInviteEmail}}, you’ve been invited to join a shared MediaPager library. Accept your invitation to create an account and start watching together.</p>
+                                <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="margin-top:26px;background:#111d30;border:1px solid #24364e;border-radius:12px">
+                                    <tr><td style="padding:17px 19px 15px">
+                                        <div style="color:#8fa2ba;font-size:10px;font-weight:bold;letter-spacing:1.4px">INVITATION FOR</div>
+                                        <div style="padding-top:6px;color:#edf3fb;font-size:14px;font-weight:bold;word-break:break-word">{{safeInviteEmail}}</div>
+                                    </td><td align="right" style="padding:17px 19px 15px">
+                                        <div style="color:#8fa2ba;font-size:10px;font-weight:bold;letter-spacing:1.4px">EXPIRES IN</div>
+                                        <div style="padding-top:6px;color:#a6e858;font-size:14px;font-weight:bold">24 hours</div>
+                                    </td></tr>
+                                </table>
+                                <table role="presentation" cellspacing="0" cellpadding="0" border="0" style="margin-top:25px"><tr>
+                                    <td align="center" bgcolor="#86d411" style="border-radius:9px;box-shadow:0 5px 18px rgba(134,212,17,.18)"><a href="{{safeInviteUrl}}" style="display:inline-block;padding:15px 24px;color:#10170a;font-size:14px;font-weight:bold;text-decoration:none;letter-spacing:.2px">Join the library&nbsp;&nbsp; &#8594;</a></td>
+                                </tr></table>
+                                <p style="margin:25px 0 8px;color:#8fa2ba;font-size:12px;line-height:1.6">Button not working? Copy this private invitation link into your browser:</p>
+                                <p style="margin:0;padding:12px 14px;background:#090f1b;border:1px solid #1e2a3d;border-radius:8px;color:#70cfff;font-size:12px;line-height:1.6;word-break:break-all"><a href="{{safeInviteUrl}}" style="color:#70cfff;text-decoration:underline">{{safeInviteUrl}}</a></p>
+                                <p style="margin:22px 0 0;color:#8fa2ba;font-size:12px;line-height:1.7">This link is private to you and can only be used once. If you weren’t expecting this invite, you can ignore this email—no account will be created unless you accept.</p>
+                            </td></tr>
+                            <tr><td style="padding:0 38px"><div style="height:1px;background:#202d41;font-size:0;line-height:0">&nbsp;</div></td></tr>
+                            <tr><td style="padding:19px 38px 25px;color:#697b94;font-size:11px;line-height:1.6">Sent by MediaPager · Your library, your way.</td></tr>
+                        </table>
+                    </td></tr>
+                </table>
+            </body>
+            </html>
+            """;
+        var sent = await emailSender.SendAsync(address.Address, "A MediaPager library is waiting for you",
+            inviteText, inviteHtml, cancellationToken);
         if (!sent)
         {
             database.RegistrationInvites.Remove(invite);
@@ -329,6 +470,18 @@ public sealed class AuthController(
 
         return Ok(new { message = "Invitation sent. The link expires in 24 hours." });
     }
+
+    private static string BuildFrontendAuthUrl(Uri frontendUri, string mode, string email, string token)
+    {
+        // Keep the configured path: deployments often serve the SPA below a reverse-proxy
+        // prefix such as https://example.com/mediapager/.
+        var pageUrl = frontendUri.GetLeftPart(UriPartial.Path).TrimEnd('/') + "/";
+        return $"{pageUrl}?mode={Uri.EscapeDataString(mode)}" +
+            $"&email={Uri.EscapeDataString(email)}&token={Uri.EscapeDataString(token)}";
+    }
+
+    private static string BuildFrontendAssetUrl(Uri frontendUri, string assetName) =>
+        $"{frontendUri.GetLeftPart(UriPartial.Path).TrimEnd('/')}/{Uri.EscapeDataString(assetName)}";
 
     [HttpPost("reset-password")]
     [AllowAnonymous]

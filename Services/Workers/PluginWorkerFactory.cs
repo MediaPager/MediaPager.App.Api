@@ -26,10 +26,13 @@ public sealed class PluginWorkerFactory(ILoggerFactory loggerFactory) : IPluginW
         var activity = new PluginActivity(activityStore) { PluginId = pluginId };
         var browser = hostServices.GetRequiredService<IBrowserAutomationBroker>();
         var mediaTools = hostServices.GetRequiredService<IMediaToolBroker>();
+        var emailSender = hostCapabilities.Contains(PluginHostCapabilityNames.EmailSending)
+            ? hostServices.GetService<IPluginEmailSender>()
+            : null;
         var workerDescription = StartWorker(
-            pluginDirectory, pluginId, settings, activity, browser, mediaTools, activityStore, hostCapabilities);
+            pluginDirectory, pluginId, settings, activity, browser, mediaTools, emailSender, activityStore, hostCapabilities);
         var lease = new WorkerLease(
-            () => GetOrRestartWorker(pluginDirectory, pluginId, settings, activity, browser, mediaTools, activityStore, hostCapabilities),
+            () => GetOrRestartWorker(pluginDirectory, pluginId, settings, activity, browser, mediaTools, emailSender, activityStore, hostCapabilities),
             () => StopWorker(pluginId));
 
         if (workerDescription.IsStreamProvider)
@@ -47,6 +50,7 @@ public sealed class PluginWorkerFactory(ILoggerFactory loggerFactory) : IPluginW
         IPluginActivity activity,
         IBrowserAutomationBroker browser,
         IMediaToolBroker mediaTools,
+        IPluginEmailSender? emailSender,
         PluginActivityStore activityStore,
         IReadOnlySet<string> hostCapabilities)
     {
@@ -61,7 +65,7 @@ public sealed class PluginWorkerFactory(ILoggerFactory loggerFactory) : IPluginW
                 existing.Dispose();
             }
 
-            var worker = CreateWorker(pluginDirectory, pluginId, settings, activity, browser, mediaTools, activityStore, hostCapabilities);
+            var worker = CreateWorker(pluginDirectory, pluginId, settings, activity, browser, mediaTools, emailSender, activityStore, hostCapabilities);
             try
             {
                 var description = worker.StartAndDescribe();
@@ -86,6 +90,7 @@ public sealed class PluginWorkerFactory(ILoggerFactory loggerFactory) : IPluginW
         IPluginActivity activity,
         IBrowserAutomationBroker browser,
         IMediaToolBroker mediaTools,
+        IPluginEmailSender? emailSender,
         PluginActivityStore activityStore,
         IReadOnlySet<string> hostCapabilities)
     {
@@ -100,7 +105,7 @@ public sealed class PluginWorkerFactory(ILoggerFactory loggerFactory) : IPluginW
                 worker.Dispose();
             }
 
-            var replacement = CreateWorker(pluginDirectory, pluginId, settings, activity, browser, mediaTools, activityStore, hostCapabilities);
+            var replacement = CreateWorker(pluginDirectory, pluginId, settings, activity, browser, mediaTools, emailSender, activityStore, hostCapabilities);
             try
             {
                 var description = replacement.StartAndDescribe();
@@ -124,9 +129,10 @@ public sealed class PluginWorkerFactory(ILoggerFactory loggerFactory) : IPluginW
         IPluginActivity activity,
         IBrowserAutomationBroker browser,
         IMediaToolBroker mediaTools,
+        IPluginEmailSender? emailSender,
         PluginActivityStore activityStore,
         IReadOnlySet<string> hostCapabilities) =>
-        new(pluginDirectory, pluginId, settings, activity, browser, mediaTools,
+        new(pluginDirectory, pluginId, settings, activity, browser, mediaTools, emailSender,
             hostCapabilities,
             jobId => { activityStore.CancelJob(jobId); },
             loggerFactory.CreateLogger($"PluginWorker.{pluginId}"));

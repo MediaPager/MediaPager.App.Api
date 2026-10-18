@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Globalization;
+using System.Text.Json;
 using MediaPager.App.PluginContracts;
 
 namespace MediaPager.App.Api.Services.Tools;
@@ -136,7 +137,9 @@ public sealed class FfmpegMediaToolBroker(
 
             var toolPaths = await tools.EnsureInstalledAsync(cancellationToken, progress);
             progress?.Report(new MediaToolProgress(0.1, "Probing source media…"));
-            var duration = await ProbeDurationAsync(toolPaths.Ffprobe, request.SourceUri, cancellationToken);
+            var probe = await ProbeMediaAsync(toolPaths.Ffprobe, request.SourceUri, cancellationToken);
+            var duration = probe?.DurationMicros;
+            var audioTracks = FfmpegAudioTrackPolicy.SelectForOutput(probe?.AudioStreams);
             var scratchDirectory = request.ScratchInCatalog
                 ? outputDirectory
                 : Path.Combine(toolDirectory.Root, "scratch");
@@ -172,7 +175,7 @@ public sealed class FfmpegMediaToolBroker(
             try
             {
                 progress?.Report(new MediaToolProgress(0.01, "Transcoding media…"));
-                await RunTranscodeAsync(toolPaths.Ffmpeg, request, scratchPath, duration, progress, cancellationToken);
+                await RunTranscodeAsync(toolPaths.Ffmpeg, request, scratchPath, duration, audioTracks, progress, cancellationToken);
                 cancellationToken.ThrowIfCancellationRequested();
                 File.Move(scratchPath, finalPath, overwrite: true);
                 await library.UpdateStoragePathAsync(itemId, finalPath, cancellationToken);
@@ -200,10 +203,11 @@ public sealed class FfmpegMediaToolBroker(
         MediaTransferRequest request,
         string scratchPath,
         long? durationMicros,
+        IReadOnlyList<FfmpegOutputAudioStream>? audioTracks,
         IProgress<MediaToolProgress>? progress,
         CancellationToken cancellationToken)
     {
-        var (extension, arguments) = TranscodeArguments(request);
+        var (extension, arguments) = TranscodeArguments(request, audioTracks);
         _ = extension;
         arguments = AddMusicTags(arguments, request);
         var startInfo = new ProcessStartInfo
@@ -255,7 +259,10 @@ public sealed class FfmpegMediaToolBroker(
             throw new InvalidOperationException("FFmpeg completed without creating the expected output file.");
     }
 
-    private async Task<long?> ProbeDurationAsync(string ffprobePath, Uri sourceUri, CancellationToken cancellationToken)
+    private async Task<FfmpegAudioProbeResult?> ProbeMediaAsync(
+        string ffprobePath,
+        Uri sourceUri,
+        CancellationToken cancellationToken)
     {
         try
         {
@@ -271,7 +278,9 @@ public sealed class FfmpegMediaToolBroker(
             foreach (var argument in new[]
                      {
                          "-v", "error", "-protocol_whitelist", "https,tls,tcp,crypto,http",
-                         "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1",
+                         "-show_entries",
+                         "format=duration:stream=index,codec_type:stream_tags=language,title:stream_disposition=default,dub,original,comment,lyrics,karaoke,forced,hearing_impaired,visual_impaired,clean_effects,attached_pic,timed_thumbnails,non_diegetic,captions,descriptions,metadata,dependent,still_image",
+                         "-of", "json",
                          sourceUri.ToString(),
                      })
                 startInfo.ArgumentList.Add(argument);
@@ -284,20 +293,20 @@ public sealed class FfmpegMediaToolBroker(
             var stdout = await process.StandardOutput.ReadToEndAsync(cancellationToken);
             _ = await process.StandardError.ReadToEndAsync(cancellationToken);
             await process.WaitForExitAsync(cancellationToken);
-            return process.ExitCode == 0 &&
-                   double.TryParse(stdout.Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out var seconds) && seconds > 0
-                ? (long)(seconds * 1_000_000)
-                : null;
+            return process.ExitCode == 0 ? FfmpegAudioTrackPolicy.ParseProbeJson(stdout) : null;
         }
         catch (OperationCanceledException) { throw; }
         catch (Exception exception)
         {
-            logger.LogDebug(exception, "Could not probe media duration; progress will be indeterminate.");
+            logger.LogDebug("Could not probe media metadata ({ExceptionType}); retaining default stream mapping.",
+                exception.GetType().Name);
             return null;
         }
     }
 
-    private static (string Extension, string[] Arguments) TranscodeArguments(MediaTransferRequest request)
+    private static (string Extension, string[] Arguments) TranscodeArguments(
+        MediaTransferRequest request,
+        IReadOnlyList<FfmpegOutputAudioStream>? audioTracks = null)
     {
         if (request.Kind is MediaKind.Music or MediaKind.Podcast or MediaKind.Audiobook or MediaKind.Book)
         {
@@ -310,13 +319,18 @@ public sealed class FfmpegMediaToolBroker(
             };
         }
 
-        return request.Profile switch
+        var (extension, codecArguments) = request.Profile switch
         {
-            MediaTranscodeProfile.H264 => (".mp4", ["-map", "0:v:0", "-map", "0:a?", "-sn", "-c:v", "libx264", "-preset", "medium", "-crf", "23", "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart"]),
-            MediaTranscodeProfile.H265 => (".mp4", ["-map", "0:v:0", "-map", "0:a?", "-sn", "-c:v", "libx265", "-preset", "medium", "-crf", "28", "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart"]),
-            MediaTranscodeProfile.Av1 => (".mp4", ["-map", "0:v:0", "-map", "0:a?", "-sn", "-c:v", "libsvtav1", "-preset", "6", "-crf", "30", "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart"]),
-            _ => (".mp4", ["-map", "0:v:0", "-map", "0:a?", "-sn", "-c", "copy", "-bsf:a", "aac_adtstoasc", "-movflags", "+faststart"]),
+            MediaTranscodeProfile.H264 => (".mp4", new[] { "-sn", "-c:v", "libx264", "-preset", "medium", "-crf", "23", "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart" }),
+            MediaTranscodeProfile.H265 => (".mp4", new[] { "-sn", "-c:v", "libx265", "-preset", "medium", "-crf", "28", "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart" }),
+            MediaTranscodeProfile.Av1 => (".mp4", new[] { "-sn", "-c:v", "libsvtav1", "-preset", "6", "-crf", "30", "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart" }),
+            _ => (".mp4", new[] { "-sn", "-c", "copy", "-bsf:a", "aac_adtstoasc", "-movflags", "+faststart" }),
         };
+        var arguments = new List<string> { "-map", "0:v:0" };
+        arguments.AddRange(FfmpegAudioTrackPolicy.MappingArguments(audioTracks));
+        arguments.AddRange(codecArguments);
+        arguments.AddRange(FfmpegAudioTrackPolicy.MetadataArguments(audioTracks));
+        return (extension, arguments.ToArray());
     }
 
     private static string[] AddMusicTags(string[] arguments, MediaTransferRequest request)

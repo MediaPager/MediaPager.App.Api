@@ -8,6 +8,10 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <Compile Remove="tests/**/*.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="../MediaPager.App.PluginContracts/MediaPager.App.PluginContracts.csproj" />
     <ProjectReference Include="../MediaPager.App.Core/MediaPager.App.Core.csproj" />
     <ProjectReference Include="../NoBugsGiven.Quasar.Interop/NoBugsGiven.Quasar.Interop.csproj" />
