@@ -14,6 +14,7 @@ public sealed class CatalogItemsController(
     ArtworkStorage artwork,
     StorageLayout storageLayout,
     LocalFileSessionState localSessions,
+    LocalPlaybackPreparationService localPlayback,
     IRuntimeSettings settings,
     IHttpClientFactory httpClientFactory) : ControllerBase
 {
@@ -716,8 +717,18 @@ public sealed class CatalogItemsController(
         if (string.IsNullOrWhiteSpace(item.StoragePath) || !System.IO.File.Exists(item.StoragePath))
             return BadRequest(new { error = "This item has no local file to play." });
 
-        var token = localSessions.Create(item.StoragePath);
-        return Ok(new { url = $"{Request.Scheme}://{Request.Host}/local/{token}", mime = MimeFor(item.StoragePath) });
+        string playbackPath;
+        try
+        {
+            playbackPath = await localPlayback.PrepareForPlaybackAsync(item.StoragePath, cancellationToken);
+        }
+        catch (LocalPlaybackPreparationException)
+        {
+            return Problem("The local file could not be prepared for browser playback.", statusCode: 503);
+        }
+
+        var token = localSessions.Create(playbackPath);
+        return Ok(new { url = $"/local/{token}", mime = MimeFor(playbackPath) });
     }
 
     // DELETE /catalog-items/{id} — remove a library entry; the file itself stays on disk.

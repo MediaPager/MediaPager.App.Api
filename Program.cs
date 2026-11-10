@@ -332,6 +332,7 @@ builder.Services.AddSingleton<IPluginSettingsRepository, PluginSettingsService>(
 builder.Services.AddSingleton<ManagedToolDirectory>();
 builder.Services.AddSingleton<ManagedToolsBootstrapState>();
 builder.Services.AddHttpClient<FfmpegToolInstaller>(client => client.Timeout = Timeout.InfiniteTimeSpan);
+builder.Services.AddSingleton<LocalPlaybackPreparationService>();
 builder.Services.AddHttpClient(nameof(DocumentToolsetInstaller), (services, client) =>
 {
     client.Timeout = Timeout.InfiniteTimeSpan;
