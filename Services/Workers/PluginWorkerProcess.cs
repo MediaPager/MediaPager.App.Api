@@ -264,8 +264,7 @@ internal sealed class PluginWorkerProcess : IDisposable
         {
             return message.Operation switch
             {
-                "get-public-text" => PluginWorkerJson.ToElement(await _browser.GetPublicTextAsync(
-                    new Uri(PluginWorkerJson.Deserialize<WorkerPublicUri>(message.Arguments).Uri), cancellationToken)),
+                "get-public-text" => await GetPublicTextResultAsync(message, cancellationToken),
                 "navigate-and-match" => PluginWorkerJson.ToElement(await _browser.NavigateAndWaitForRequestAsync(
                     PluginWorkerJson.Deserialize<BrowserAutomationRequest>(message.Arguments), cancellationToken)),
                 _ => throw new PluginOperationException(new PluginError("browser.operation.denied", "Unsupported browser operation.")),
@@ -289,6 +288,15 @@ internal sealed class PluginWorkerProcess : IDisposable
         }
 
         throw new PluginOperationException(new PluginError("plugin.capability.denied", "The host did not grant this capability."));
+    }
+
+    private async Task<JsonElement> GetPublicTextResultAsync(
+        PluginWorkerMessage message,
+        CancellationToken cancellationToken)
+    {
+        var request = PluginWorkerJson.Deserialize<WorkerPublicUri>(message.Arguments);
+        var text = await _browser.GetPublicTextAsync(new Uri(request.Uri), request.Headers, cancellationToken);
+        return PluginWorkerJson.ToElement(text);
     }
 
     private async Task<JsonElement> DispatchActivityCallAsync(PluginWorkerMessage message, CancellationToken cancellationToken)
@@ -567,5 +575,5 @@ internal sealed class PluginWorkerProcess : IDisposable
         }
     }
 
-    private sealed record WorkerPublicUri(string Uri);
+    private sealed record WorkerPublicUri(string Uri, IReadOnlyDictionary<string, string>? Headers = null);
 }

@@ -5,10 +5,18 @@ using System.Collections.Concurrent;
 // streaming endpoints and the session record live together.
 namespace MediaPager.App.Api.Services;
 
-public sealed class StreamSession(string id, string? rootContentType)
+public sealed class StreamSession(
+    string id,
+    string? rootContentType,
+    IReadOnlyDictionary<string, string> requestHeaders)
 {
     public string Id { get; } = id;
     public string? RootContentType { get; } = rootContentType;
+
+    /// <summary>Upstream request headers the provider asked the host to forward for this
+    /// session's root URL, playlists, and segments.</summary>
+    public IReadOnlyDictionary<string, string> RequestHeaders { get; } = requestHeaders;
+
     public DateTimeOffset CreatedAt { get; } = DateTimeOffset.UtcNow;
     public ConcurrentDictionary<string, Uri> Resources { get; } = new();
 }
@@ -17,7 +25,10 @@ public sealed class StreamSessionState
 {
     private readonly ConcurrentDictionary<string, StreamSession> streams = new();
 
-    public StreamSession Create(Uri rootUri, string? rootContentType = null)
+    public StreamSession Create(
+        Uri rootUri,
+        string? rootContentType = null,
+        IReadOnlyDictionary<string, string>? requestHeaders = null)
     {
         // Drop sessions older than 2 hours before adding a new one.
         foreach (var expired in streams.Where(entry => DateTimeOffset.UtcNow - entry.Value.CreatedAt > TimeSpan.FromHours(2)))
@@ -25,7 +36,8 @@ public sealed class StreamSessionState
 
         var session = new StreamSession(
             Convert.ToHexString(System.Security.Cryptography.RandomNumberGenerator.GetBytes(16)).ToLowerInvariant(),
-            rootContentType);
+            rootContentType,
+            StreamingService.NormalizeRequestHeaders(requestHeaders));
         session.Resources["root"] = rootUri;
         streams[session.Id] = session;
         return session;

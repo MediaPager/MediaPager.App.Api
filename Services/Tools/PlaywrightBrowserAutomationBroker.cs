@@ -25,12 +25,22 @@ public sealed class PlaywrightBrowserAutomationBroker(
     private IPlaywright? _playwright;
     private IBrowser? _browser;
 
-    public async Task<string> GetPublicTextAsync(Uri uri, CancellationToken cancellationToken = default)
+    public Task<string> GetPublicTextAsync(Uri uri, CancellationToken cancellationToken = default) =>
+        GetPublicTextAsync(uri, null, cancellationToken);
+
+    public async Task<string> GetPublicTextAsync(
+        Uri uri,
+        IReadOnlyDictionary<string, string>? requestHeaders,
+        CancellationToken cancellationToken = default)
     {
         if (!await StreamingService.IsSafeStreamUri(uri, cancellationToken))
             throw new InvalidOperationException("The browser broker only fetches public HTTPS URLs.");
 
-        using var response = await _publicHttp.GetAsync(uri, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+        using var request = new HttpRequestMessage(HttpMethod.Get, uri);
+        StreamingService.ApplyRequestHeaders(
+            request, StreamingService.NormalizeRequestHeaders(requestHeaders));
+        using var response = await _publicHttp.SendAsync(
+            request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
         if (response.StatusCode is >= HttpStatusCode.MultipleChoices and < HttpStatusCode.BadRequest)
             throw new InvalidOperationException("Redirects are not followed by the public-fetch broker.");
         response.EnsureSuccessStatusCode();

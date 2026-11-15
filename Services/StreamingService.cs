@@ -9,6 +9,47 @@ namespace MediaPager.App.Api.Services;
 
 public static class StreamingService
 {
+    private static readonly IReadOnlyDictionary<string, string> NoRequestHeaders =
+        new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+    // A plugin may attach upstream request headers (for example a referer the upstream
+    // requires). Drop framing/hop-by-hop headers so a plugin cannot corrupt the proxied
+    // request, and bound the count and sizes.
+    private static readonly HashSet<string> ReservedRequestHeaders = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "Host", "Content-Length", "Content-Type", "Connection", "Keep-Alive",
+        "Transfer-Encoding", "Upgrade", "TE", "Trailer", "Range", "Expect",
+        "Proxy-Connection", "Proxy-Authorization",
+    };
+
+    public static IReadOnlyDictionary<string, string> NormalizeRequestHeaders(
+        IReadOnlyDictionary<string, string>? requestHeaders)
+    {
+        if (requestHeaders is null || requestHeaders.Count == 0)
+            return NoRequestHeaders;
+
+        var normalized = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var (name, value) in requestHeaders)
+        {
+            if (normalized.Count >= 16) break;
+            if (string.IsNullOrWhiteSpace(name) || name.Length > 64) continue;
+            if (value is null || value.Length > 1024 || value.Contains('\r') || value.Contains('\n')) continue;
+            var headerName = name.Trim();
+            if (ReservedRequestHeaders.Contains(headerName)) continue;
+            normalized[headerName] = value.Trim();
+        }
+
+        return normalized;
+    }
+
+    public static void ApplyRequestHeaders(
+        HttpRequestMessage request,
+        IReadOnlyDictionary<string, string> requestHeaders)
+    {
+        foreach (var (name, value) in requestHeaders)
+            request.Headers.TryAddWithoutValidation(name, value);
+    }
+
     // Only allow HTTPS URLs that resolve to public IP addresses (SSRF guard).
     public static async Task<bool> IsSafeStreamUri(Uri uri, CancellationToken cancellationToken)
     {

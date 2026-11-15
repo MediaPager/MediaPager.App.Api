@@ -31,6 +31,7 @@ public sealed class StreamingController(
         for (var redirectCount = 0; redirectCount <= 5; redirectCount++)
         {
             using var upstreamRequest = new HttpRequestMessage(HttpMethod.Get, currentUri);
+            StreamingService.ApplyRequestHeaders(upstreamRequest, session.RequestHeaders);
             if (Request.Headers.TryGetValue("Range", out var range))
                 upstreamRequest.Headers.TryAddWithoutValidation("Range", range.ToString());
 

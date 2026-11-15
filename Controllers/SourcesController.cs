@@ -230,7 +230,7 @@ public sealed class SourcesController(
                 directPlayback = true,
             });
 
-        var session = sessions.Create(result.UpstreamUri, result.ContentType);
+        var session = sessions.Create(result.UpstreamUri, result.ContentType, result.RequestHeaders);
         return Ok(new { streamId = session.Id, contentType = result.ContentType, directPlayback = false });
     }
 

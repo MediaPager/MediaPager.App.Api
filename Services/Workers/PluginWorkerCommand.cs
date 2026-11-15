@@ -575,6 +575,13 @@ internal sealed class WorkerBrowserBroker(PluginWorkerHostClient host) : IBrowse
     public Task<string> GetPublicTextAsync(Uri uri, CancellationToken cancellationToken = default) =>
         host.CallHostAsync<string>("browser.automation", "get-public-text", new { uri = uri.AbsoluteUri }, cancellationToken);
 
+    public Task<string> GetPublicTextAsync(
+        Uri uri,
+        IReadOnlyDictionary<string, string>? requestHeaders,
+        CancellationToken cancellationToken = default) =>
+        host.CallHostAsync<string>("browser.automation", "get-public-text",
+            new { uri = uri.AbsoluteUri, headers = requestHeaders }, cancellationToken);
+
     public Task<string?> NavigateAndWaitForRequestAsync(
         BrowserAutomationRequest request,
         CancellationToken cancellationToken = default) =>
