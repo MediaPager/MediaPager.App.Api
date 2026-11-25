@@ -13,10 +13,13 @@ public sealed class FfmpegMediaToolBroker(
     ManagedToolsBootstrapState bootstrapState,
     ILibraryStore library,
     PluginRegistry registry,
+    StreamSessionState sessions,
+    IConfiguration configuration,
     ILogger<FfmpegMediaToolBroker> logger) : IMediaToolBroker
 {
     private const int MaxConcurrentTransfers = 3;
     private readonly SemaphoreSlim _transferSlots = new(MaxConcurrentTransfers, MaxConcurrentTransfers);
+    private readonly Uri _localProxyBase = ResolveLocalProxyBase(configuration);
 
     public async Task<bool> IsDestinationAvailableAsync(
         int catalogId,
@@ -73,9 +76,14 @@ public sealed class FfmpegMediaToolBroker(
             var result = await provider.ResolveAsync(
                 new StreamResolveRequest(source.Key, context.ExternalId, source.Kind, context.Season, context.Episode),
                 cancellationToken);
-            if (result?.UpstreamUri is { } uri && await StreamingService.IsSafeStreamUri(uri, cancellationToken))
-                return new ResolvedStreamSource(uri, source.Kind);
-            return null;
+            if (result?.UpstreamUri is not { } uri ||
+                !await StreamingService.IsSafeStreamUri(uri, cancellationToken))
+                return null;
+
+            // Batch transfers use the same host proxy as playback so provider headers and
+            // relative tokenized references stay intact end to end.
+            var session = sessions.Create(uri, result.ContentType, result.RequestHeaders);
+            return new ResolvedStreamSource(new Uri(_localProxyBase, $"stream/{session.Id}/root"), source.Kind);
         }
         return null;
     }
@@ -93,8 +101,9 @@ public sealed class FfmpegMediaToolBroker(
         if (request.Kind == MediaKind.Document)
             throw new InvalidOperationException("Document files cannot be processed by the media transfer tool.");
         await bootstrapState.WaitAsync(cancellationToken);
-        if (!await StreamingService.IsSafeStreamUri(request.SourceUri, cancellationToken))
-            throw new InvalidOperationException("The media source must be a public HTTPS URL.");
+        if (!IsLocalProxyUri(request.SourceUri) &&
+            !await StreamingService.IsSafeStreamUri(request.SourceUri, cancellationToken))
+            throw new InvalidOperationException("The media source must be a public HTTPS URL or this host's stream proxy.");
 
         await _transferSlots.WaitAsync(cancellationToken);
         try
@@ -198,6 +207,27 @@ public sealed class FfmpegMediaToolBroker(
         }
     }
 
+    private bool IsLocalProxyUri(Uri uri) =>
+        uri.Scheme == _localProxyBase.Scheme &&
+        uri.Host == _localProxyBase.Host &&
+        uri.Port == _localProxyBase.Port &&
+        uri.AbsolutePath.StartsWith("/stream/", StringComparison.Ordinal) &&
+        uri.AbsolutePath.EndsWith("/root", StringComparison.Ordinal);
+
+    private static Uri ResolveLocalProxyBase(IConfiguration configuration)
+    {
+        var addresses = Environment.GetEnvironmentVariable("ASPNETCORE_URLS") ??
+                        configuration["urls"] ??
+                        "http://127.0.0.1:5000";
+        var first = addresses.Split(';', StringSplitOptions.RemoveEmptyEntries).FirstOrDefault()
+                    ?? "http://127.0.0.1:5000";
+        if (!Uri.TryCreate(first, UriKind.Absolute, out var address) || address.Scheme != Uri.UriSchemeHttp)
+            return new Uri("http://127.0.0.1:5000/");
+
+        var host = address.Host is "0.0.0.0" or "+" or "*" ? "127.0.0.1" : address.Host;
+        return new Uri($"http://{host}:{address.Port}/");
+    }
+
     private async Task RunTranscodeAsync(
         string ffmpegPath,
         MediaTransferRequest request,
@@ -222,7 +252,7 @@ public sealed class FfmpegMediaToolBroker(
         foreach (var argument in new[]
                  {
                      "-hide_banner", "-nostdin", "-loglevel", "error", "-y",
-                     "-protocol_whitelist", "https,tls,tcp,crypto,http", "-i", request.SourceUri.ToString(),
+                     "-protocol_whitelist", "https,tls,tcp,crypto,http", "-allowed_extensions", "ALL", "-i", request.SourceUri.ToString(),
                  })
             startInfo.ArgumentList.Add(argument);
         foreach (var argument in arguments)
@@ -277,7 +307,7 @@ public sealed class FfmpegMediaToolBroker(
             FfmpegCertificateTrust.Configure(startInfo, toolDirectory.Root, logger);
             foreach (var argument in new[]
                      {
-                         "-v", "error", "-protocol_whitelist", "https,tls,tcp,crypto,http",
+                         "-v", "error", "-protocol_whitelist", "https,tls,tcp,crypto,http", "-allowed_extensions", "ALL",
                          "-show_entries",
                          "format=duration:stream=index,codec_type:stream_tags=language,title:stream_disposition=default,dub,original,comment,lyrics,karaoke,forced,hearing_impaired,visual_impaired,clean_effects,attached_pic,timed_thumbnails,non_diegetic,captions,descriptions,metadata,dependent,still_image",
                          "-of", "json",

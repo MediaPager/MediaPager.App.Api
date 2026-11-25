@@ -1,3 +1,4 @@
+using System.Text;
 using System.Text.RegularExpressions;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
@@ -53,12 +54,27 @@ public sealed class StreamingController(
         using (upstreamResponse)
         {
             var mediaType = upstreamResponse.Content.Headers.ContentType?.MediaType ?? "application/octet-stream";
+            var declaredRootPlaylist = upstreamResponse.IsSuccessStatusCode &&
+                resourceId == "root" &&
+                session.RootContentType?.Contains("mpegurl", StringComparison.OrdinalIgnoreCase) == true;
             var isPlaylist = currentUri.AbsolutePath.EndsWith(".m3u8", StringComparison.OrdinalIgnoreCase) ||
-                mediaType.Contains("mpegurl", StringComparison.OrdinalIgnoreCase);
+                mediaType.Contains("mpegurl", StringComparison.OrdinalIgnoreCase) ||
+                declaredRootPlaylist;
 
-            if (upstreamResponse.IsSuccessStatusCode && isPlaylist)
+            // Extensionless HLS references can be given a synthetic extension for ffmpeg, and
+            // some upstreams label playlists as text/plain. Sniff the body before rewriting.
+            await using var upstreamStream = await upstreamResponse.Content.ReadAsStreamAsync(cancellationToken);
+            var sniff = new byte[7];
+            var sniffRead = await upstreamStream.ReadAsync(sniff.AsMemory(0, sniff.Length), cancellationToken);
+            var looksLikePlaylist = sniffRead == sniff.Length &&
+                Encoding.ASCII.GetString(sniff) == "#EXTM3U";
+
+            if (upstreamResponse.IsSuccessStatusCode && (isPlaylist || looksLikePlaylist))
             {
-                var playlist = await upstreamResponse.Content.ReadAsStringAsync(cancellationToken);
+                using var buffer = new MemoryStream();
+                buffer.Write(sniff, 0, sniffRead);
+                await upstreamStream.CopyToAsync(buffer, cancellationToken);
+                var playlist = Encoding.UTF8.GetString(buffer.ToArray());
                 var lines = playlist.Replace("\r\n", "\n").Split('\n');
                 for (var index = 0; index < lines.Length; index++)
                 {
@@ -74,9 +90,15 @@ public sealed class StreamingController(
                     }
                 }
 
+                var rewritten = string.Join('\n', lines);
+
                 Response.StatusCode = (int)upstreamResponse.StatusCode;
-                Response.ContentType = upstreamResponse.Content.Headers.ContentType?.ToString() ?? "application/vnd.apple.mpegurl";
-                await Response.WriteAsync(string.Join('\n', lines), cancellationToken);
+                Response.ContentType = declaredRootPlaylist
+                    ? session.RootContentType
+                    : mediaType.Contains("mpegurl", StringComparison.OrdinalIgnoreCase)
+                        ? upstreamResponse.Content.Headers.ContentType!.ToString()
+                        : "application/vnd.apple.mpegurl";
+                await Response.WriteAsync(rewritten, cancellationToken);
                 return new EmptyResult();
             }
 
@@ -84,7 +106,8 @@ public sealed class StreamingController(
             // The upstream often mislabels media segments as text/html, which makes the browser's
             // HLS engine reject them. Serve a correct media type by path, falling back to binary.
             var segmentPath = currentUri.AbsolutePath.ToLowerInvariant();
-            Response.ContentType = resourceId == "root" && !string.IsNullOrWhiteSpace(session.RootContentType)
+            Response.ContentType = upstreamResponse.IsSuccessStatusCode &&
+                resourceId == "root" && !string.IsNullOrWhiteSpace(session.RootContentType)
                 ? session.RootContentType
                 : segmentPath switch
             {
@@ -104,7 +127,8 @@ public sealed class StreamingController(
             if (upstreamResponse.Headers.AcceptRanges.Count > 0)
                 Response.Headers.AcceptRanges = string.Join(", ", upstreamResponse.Headers.AcceptRanges);
 
-            await upstreamResponse.Content.CopyToAsync(Response.Body, cancellationToken);
+            await Response.Body.WriteAsync(sniff.AsMemory(0, sniffRead), cancellationToken);
+            await upstreamStream.CopyToAsync(Response.Body, cancellationToken);
             return new EmptyResult();
         }
     }

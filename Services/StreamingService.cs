@@ -91,6 +91,16 @@ public static class StreamingService
         if (!Uri.TryCreate(parent, rawUrl, out var target) || target.Scheme != Uri.UriSchemeHttps)
             return rawUrl;
 
+        // HLS playlists normally use relative references, while capability URLs can carry a
+        // short-lived token in the parent query. Relative resolution drops that query, so
+        // carry it forward when the reference does not supply one of its own.
+        if (string.IsNullOrEmpty(target.Query) && !string.IsNullOrEmpty(parent.Query))
+        {
+            target = new Uri(
+                target.GetLeftPart(UriPartial.Path) + parent.Query + target.Fragment,
+                UriKind.Absolute);
+        }
+
         var resourceId = Convert.ToHexString(System.Security.Cryptography.RandomNumberGenerator.GetBytes(12)).ToLowerInvariant();
         session.Resources[resourceId] = target;
 
