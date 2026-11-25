@@ -345,12 +345,18 @@ builder.Services.AddHttpClient(nameof(DocumentToolsetInstaller), (services, clie
 builder.Services.AddHttpClient<ManagedPluginBuildSdkProvider>(client => client.Timeout = Timeout.InfiniteTimeSpan);
 builder.Services.AddSingleton<IPluginBuildSdkProvider>(services =>
     services.GetRequiredService<ManagedPluginBuildSdkProvider>());
+#if MEDIAPAGER_PLAYWRIGHT
 builder.Services.AddSingleton<PlaywrightBrowserInstaller>();
+#endif
 builder.Services.AddSingleton<ManagedToolsProvisioner>();
 builder.Services.AddHostedService<ManagedToolsBootstrapService>();
 builder.Services.AddSingleton<DocumentToolsetInstaller>();
 builder.Services.AddHostedService<DocumentToolsBootstrapService>();
+#if MEDIAPAGER_PLAYWRIGHT
 builder.Services.AddSingleton<IBrowserAutomationBroker, PlaywrightBrowserAutomationBroker>();
+#else
+builder.Services.AddSingleton<IBrowserAutomationBroker, DisabledBrowserAutomationBroker>();
+#endif
 builder.Services.AddSingleton<IPluginWorkerFactory, PluginWorkerFactory>();
 builder.Services.AddSingleton<PluginDeployer>();
 builder.Services.AddSingleton<PluginInstaller>();
@@ -410,7 +416,9 @@ await using (var scope = app.Services.CreateAsyncScope())
     // Deployment environment variables remain the final override over runtime DB values.
     builder.Configuration.AddEnvironmentVariables(prefix: "MEDIAPAGER_");
     storageLayout.Refresh();
+#if MEDIAPAGER_PLAYWRIGHT
     PlaywrightBrowserInstaller.ConfigureBrowserPath(storageLayout.ToolsDirectory);
+#endif
     ArtworkStorage.MigrateLegacyDefaultArtwork(storageLayout.DataRoot);
 
     // Seed the catalog lookup tables (idempotent — insert only what's missing).

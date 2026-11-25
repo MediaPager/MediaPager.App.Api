@@ -2,7 +2,7 @@ namespace MediaPager.App.Api.Services.Tools;
 
 /// <summary>Resolves the writable managed-tool cache under Settings:Storage. Existing
 /// adjacent/legacy caches are copied into the selected persistent directory once so upgrades
-/// retain downloaded tools without continuing to write beside the application image.</summary>
+/// retain cached tools without continuing to write beside the application image.</summary>
 public sealed class ManagedToolDirectory
 {
     private readonly string configuredRoot;
@@ -58,7 +58,7 @@ public sealed class ManagedToolDirectory
         if (!Directory.Exists(candidate)) return false;
         try
         {
-            return new[] { "ffmpeg/9.0.2", "playwright/1.63.0", "dotnet-sdk/10.0.401" }
+            return new[] { "ffmpeg/9.0.2", "dotnet-sdk/10.0.401" }
                 .Any(tool => Directory.Exists(Path.Combine(candidate, tool)) &&
                              Directory.EnumerateFileSystemEntries(Path.Combine(candidate, tool)).Any());
         }

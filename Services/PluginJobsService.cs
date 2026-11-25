@@ -37,7 +37,9 @@ public sealed class PluginJobsService(
     PluginDeployer deployer,
     IConfiguration configuration,
     StorageLayout storageLayout,
+#if MEDIAPAGER_PLAYWRIGHT
     PlaywrightBrowserInstaller browserInstaller,
+#endif
     ManagedToolsBootstrapState toolBootstrapState)
 {
     private readonly ConcurrentDictionary<string, PluginJobState> _jobs = new();
@@ -240,9 +242,14 @@ public sealed class PluginJobsService(
             return new PluginEnableOutcome(StartByKey(key), null);
 
         var manifest = ReadInstalledManifest(folder, assembly);
+#if MEDIAPAGER_PLAYWRIGHT
         if (manifest?.HostCapabilities?.Contains(PluginHostCapabilityNames.BrowserAutomation) == true &&
             !browserInstaller.IsChromiumInstalled())
             return new PluginEnableOutcome(StartByKey(key), null);
+#else
+        if (manifest?.HostCapabilities?.Contains(PluginHostCapabilityNames.BrowserAutomation) == true)
+            throw new NotSupportedException("Browser-automation plugins are not supported in this build.");
+#endif
         if ((manifest?.Requires ?? []).Any(id => registry.GetPlugin(id) is null))
             return new PluginEnableOutcome(StartByKey(key), null);
 
@@ -275,6 +282,7 @@ public sealed class PluginJobsService(
         return new PluginEnableOutcome(null, $"{loadedPlugins[0].Descriptor.Name} is active.");
     }
 
+#if MEDIAPAGER_PLAYWRIGHT
     private async Task EnsurePluginToolsAsync(PluginManifest? manifest, CancellationToken cancellationToken)
     {
         if (manifest?.HostCapabilities?.Contains(PluginHostCapabilityNames.BrowserAutomation) == true)
@@ -283,6 +291,14 @@ public sealed class PluginJobsService(
             await browserInstaller.EnsureChromiumInstalledAsync(cancellationToken);
         }
     }
+#else
+    private Task EnsurePluginToolsAsync(PluginManifest? manifest, CancellationToken cancellationToken)
+    {
+        _ = manifest;
+        _ = toolBootstrapState;
+        return Task.CompletedTask;
+    }
+#endif
 
     /// <summary>Add or remove an official id in Plugins:Required:Official (appsettings.json),
     /// then reload configuration so the checklist and catalog read see it immediately.</summary>

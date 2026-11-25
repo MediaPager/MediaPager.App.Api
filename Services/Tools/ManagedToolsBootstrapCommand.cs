@@ -9,6 +9,12 @@ namespace MediaPager.App.Api.Services.Tools;
 /// bootstrap service but publishes progress to a status file shared with the unprivileged API.</summary>
 internal static class ManagedToolsBootstrapCommand
 {
+#if MEDIAPAGER_PLAYWRIGHT
+    private const string ReadyMessage = "Managed FFmpeg/FFprobe and Chromium are ready.";
+#else
+    private const string ReadyMessage = "Managed FFmpeg/FFprobe are ready.";
+#endif
+
     public static bool IsBootstrapMode(string[] args) => args.Length > 0 && args[0] == "--bootstrap-managed-tools";
 
     public static async Task<int> RunAsync(string[] args)
@@ -32,11 +38,15 @@ internal static class ManagedToolsBootstrapCommand
             .Build();
         var directories = new ManagedToolDirectory(configuration);
         var ffmpeg = new FfmpegToolInstaller(httpClient, directories, loggerFactory.CreateLogger<FfmpegToolInstaller>());
+#if MEDIAPAGER_PLAYWRIGHT
         var chromium = new PlaywrightBrowserInstaller(directories, loggerFactory.CreateLogger<PlaywrightBrowserInstaller>());
+#endif
         var provisioner = new ManagedToolsProvisioner(
             directories,
             ffmpeg,
+#if MEDIAPAGER_PLAYWRIGHT
             chromium,
+#endif
             loggerFactory.CreateLogger<ManagedToolsProvisioner>());
 
         try
@@ -63,7 +73,7 @@ internal static class ManagedToolsBootstrapCommand
 
             await ManagedToolsBootstrapStatusFile.WriteAsync(statusFile,
                 new ManagedToolsBootstrapStatus("ready", result.NeedsInstallation, 1,
-                    "Managed FFmpeg/FFprobe and Chromium are ready.", ToolDirectory: result.ToolDirectory));
+                    ReadyMessage, ToolDirectory: result.ToolDirectory));
             PrepareStatusOwnership(statusFile, owner);
             return 0;
         }

@@ -5,6 +5,9 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <UserSecretsId>d39b6ebc-80ed-4658-a2f4-ce9031fa5d3d</UserSecretsId>
+    <!-- Optional browser automation. Uncomment together with the Microsoft.Playwright
+         package reference below to re-enable the host's generic browser broker. -->
+    <!-- <DefineConstants>$(DefineConstants);MEDIAPAGER_PLAYWRIGHT</DefineConstants> -->
   </PropertyGroup>
 
   <ItemGroup>
@@ -41,7 +44,7 @@
     </PackageReference>
     <PackageReference Include="Microsoft.EntityFrameworkCore.Sqlite" Version="10.0.0" />
     <PackageReference Include="Npgsql.EntityFrameworkCore.PostgreSQL" Version="10.0.0" />
-    <PackageReference Include="Microsoft.Playwright" Version="1.63.0" />
+    <!-- <PackageReference Include="Microsoft.Playwright" Version="1.63.0" /> -->
   </ItemGroup>
 
 <ItemGroup>

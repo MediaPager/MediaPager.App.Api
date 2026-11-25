@@ -15,6 +15,13 @@ public sealed class ManagedToolsBootstrapService(
     ILogger<ManagedToolsBootstrapService> logger) : BackgroundService
 {
     private const string ActivityPluginId = "mediapager.tools";
+#if MEDIAPAGER_PLAYWRIGHT
+    private const string ReadyMessage = "FFmpeg/FFprobe and Chromium are ready.";
+    private const string ReadyNotification = "FFmpeg, FFprobe, and Chromium are installed in the managed tools directory.";
+#else
+    private const string ReadyMessage = "FFmpeg/FFprobe are ready.";
+    private const string ReadyNotification = "FFmpeg and FFprobe are installed in the managed tools directory.";
+#endif
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -217,9 +224,13 @@ public sealed class ManagedToolsBootstrapService(
 
         var selectedRoot = Path.GetFullPath(toolsDirectory);
         directories.SelectRoot(selectedRoot);
+#if MEDIAPAGER_PLAYWRIGHT
         var browserDirectory = PlaywrightBrowserInstaller.ConfigureBrowserPath(selectedRoot);
         logger.LogInformation("Using managed tools directory {ToolsDirectory} and Playwright browser directory {BrowserDirectory}.",
             selectedRoot, browserDirectory);
+#else
+        logger.LogInformation("Using managed tools directory {ToolsDirectory}.", selectedRoot);
+#endif
     }
 
     private void CompleteBootstrap(PluginJob job, ManagedToolsBootstrapResult result)
@@ -236,9 +247,9 @@ public sealed class ManagedToolsBootstrapService(
             return;
         }
 
-        job.Complete("FFmpeg/FFprobe and Chromium are ready.");
+        job.Complete(ReadyMessage);
         activity.AddNotification(ActivityPluginId, "Managed tools are ready",
-            "FFmpeg, FFprobe, and Chromium are installed in the managed tools directory.",
+            ReadyNotification,
             PluginNotificationLevel.Success);
         logger.LogInformation("Managed tools are ready in {ToolsDirectory}.", result.ToolDirectory);
     }

@@ -13,7 +13,9 @@ public sealed record ManagedToolsBootstrapResult(
 public sealed class ManagedToolsProvisioner(
     ManagedToolDirectory directories,
     FfmpegToolInstaller ffmpeg,
+#if MEDIAPAGER_PLAYWRIGHT
     PlaywrightBrowserInstaller chromium,
+#endif
     ILogger<ManagedToolsProvisioner> logger)
 {
     public async Task<ManagedToolsBootstrapResult> EnsureInstalledAsync(
@@ -26,9 +28,11 @@ public sealed class ManagedToolsProvisioner(
             cancellationToken.ThrowIfCancellationRequested();
             var ffmpegReady = await ffmpeg.IsInstalledAtAsync(candidate, cancellationToken);
             var chromiumReady = false;
+#if MEDIAPAGER_PLAYWRIGHT
             try { chromiumReady = chromium.IsChromiumInstalled(candidate); }
             catch (IOException) { }
             catch (UnauthorizedAccessException) { }
+#endif
             readiness.Add(new ToolReadiness(candidate, ffmpegReady, chromiumReady));
         }
 
@@ -39,9 +43,14 @@ public sealed class ManagedToolsProvisioner(
             ?? readiness.OrderByDescending(item => (item.FfmpegReady ? 1 : 0) + (item.ChromiumReady ? 1 : 0)).FirstOrDefault()
             ?? new ToolReadiness(directories.PreferredInstallRoot, false, false);
         directories.SelectRoot(selected.Root);
+#if MEDIAPAGER_PLAYWRIGHT
         PlaywrightBrowserInstaller.ConfigureBrowserPath(selected.Root);
+#endif
 
-        var missingCount = (selected.FfmpegReady ? 0 : 1) + (selected.ChromiumReady ? 0 : 1);
+        var missingCount = selected.FfmpegReady ? 0 : 1;
+#if MEDIAPAGER_PLAYWRIGHT
+        if (!selected.ChromiumReady) missingCount++;
+#endif
         if (missingCount == 0)
         {
             logger.LogInformation("Reusing the verified managed tools directory {ToolDirectory}.", selected.Root);
@@ -86,6 +95,7 @@ public sealed class ManagedToolsProvisioner(
             stageIndex++;
         }
 
+#if MEDIAPAGER_PLAYWRIGHT
         if (!selected.ChromiumReady)
         {
             var stageStart = stageIndex / (double)missingCount;
@@ -111,6 +121,7 @@ public sealed class ManagedToolsProvisioner(
             }
             stageIndex++;
         }
+#endif
 
         var success = failures.Count == 0;
         progress?.Report(new ManagedToolsBootstrapProgress(

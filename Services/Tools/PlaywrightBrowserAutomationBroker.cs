@@ -1,3 +1,4 @@
+#if MEDIAPAGER_PLAYWRIGHT
 using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
@@ -242,3 +243,4 @@ public sealed class PlaywrightBrowserAutomationBroker(
         _operationGate.Dispose();
     }
 }
+#endif

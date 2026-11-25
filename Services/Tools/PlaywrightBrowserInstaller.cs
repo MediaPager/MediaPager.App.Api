@@ -1,3 +1,4 @@
+#if MEDIAPAGER_PLAYWRIGHT
 using Microsoft.Playwright;
 
 namespace MediaPager.App.Api.Services.Tools;
@@ -104,3 +105,4 @@ public sealed class PlaywrightBrowserInstaller(ManagedToolDirectory toolDirector
         }
     }
 }
+#endif
