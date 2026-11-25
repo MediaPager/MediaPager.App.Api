@@ -1,5 +1,7 @@
 using System.Net;
 using System.Net.Sockets;
+using System.Buffers.Binary;
+using System.Text;
 
 // Host-side stream plumbing: the SSRF guard that validates any upstream URL before we
 // fetch or proxy it, and the HLS resource rewriter used by the playback proxy.
@@ -9,6 +11,8 @@ namespace MediaPager.App.Api.Services;
 
 public static class StreamingService
 {
+    public const int MediaSniffBytes = 4096;
+    public const int MaximumPlaylistBytes = 2 * 1024 * 1024;
     private static readonly IReadOnlyDictionary<string, string> NoRequestHeaders =
         new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
@@ -67,7 +71,7 @@ public static class StreamingService
         }
     }
 
-    private static bool IsPublicAddress(IPAddress address)
+    public static bool IsPublicAddress(IPAddress address)
     {
         if (address.IsIPv4MappedToIPv6) address = address.MapToIPv4();
         var bytes = address.GetAddressBytes();
@@ -85,11 +89,144 @@ public static class StreamingService
             !address.IsIPv6SiteLocal && !address.IsIPv6Multicast && (bytes[0] & 0xfe) != 0xfc;
     }
 
+    /// <summary>Recognize the supported media payloads from bytes, not just a caller-controlled
+    /// extension or upstream Content-Type. HLS manifests are validated separately.</summary>
+    public static bool TryClassifyMediaPayload(
+        Uri uri,
+        string? declaredContentType,
+        ReadOnlySpan<byte> prefix,
+        bool allowHlsAuxiliaryResource,
+        long? contentLength,
+        out string mediaType)
+    {
+        mediaType = "application/octet-stream";
+        var declared = declaredContentType?.Split(';', 2)[0].Trim().ToLowerInvariant() ?? "";
+
+        if (IsTransportStream(prefix))
+        {
+            mediaType = "video/mp2t";
+            return true;
+        }
+        if (IsIsoBaseMedia(prefix))
+        {
+            mediaType = declared.StartsWith("audio/", StringComparison.Ordinal) ? declared : "video/mp4";
+            return true;
+        }
+        if (HasBytes(prefix, [0x1A, 0x45, 0xDF, 0xA3]))
+        {
+            mediaType = declared.StartsWith("audio/", StringComparison.Ordinal) ? declared : "video/webm";
+            return true;
+        }
+        if (HasBytes(prefix, [0x00, 0x00, 0x01, 0xBA]))
+        {
+            mediaType = "video/mpeg";
+            return true;
+        }
+        if (HasBytes(prefix, [0x4F, 0x67, 0x67, 0x53]))
+        {
+            mediaType = declared is "video/ogg" or "audio/ogg" ? declared : "application/ogg";
+            return true;
+        }
+        if (HasBytes(prefix, [0x66, 0x4C, 0x61, 0x43]))
+        {
+            mediaType = "audio/flac";
+            return true;
+        }
+        if (HasBytes(prefix, [0x49, 0x44, 0x33]) || LooksLikeMpegAudioFrame(prefix))
+        {
+            mediaType = "audio/mpeg";
+            return true;
+        }
+        if (LooksLikeAdts(prefix))
+        {
+            mediaType = "audio/aac";
+            return true;
+        }
+        if (allowHlsAuxiliaryResource && HasAsciiPrefix(prefix, "WEBVTT") &&
+            (declared == "text/vtt" || uri.AbsolutePath.EndsWith(".vtt", StringComparison.OrdinalIgnoreCase)))
+        {
+            mediaType = "text/vtt";
+            return true;
+        }
+
+        var extension = Path.GetExtension(uri.AbsolutePath);
+        if (allowHlsAuxiliaryResource &&
+            (string.Equals(extension, ".key", StringComparison.OrdinalIgnoreCase) ||
+             string.Equals(extension, ".bin", StringComparison.OrdinalIgnoreCase)) &&
+            (contentLength is null or <= 64) && prefix.Length is > 0 and <= 64)
+        {
+            mediaType = "application/octet-stream";
+            return true;
+        }
+
+        return false;
+    }
+
+    public static bool LooksLikeHlsPlaylist(ReadOnlySpan<byte> prefix)
+    {
+        var offset = prefix.Length >= 3 && prefix[0] == 0xEF && prefix[1] == 0xBB && prefix[2] == 0xBF ? 3 : 0;
+        while (offset < prefix.Length && prefix[offset] is (byte)' ' or (byte)'\t' or (byte)'\r' or (byte)'\n') offset++;
+        return prefix[offset..].StartsWith(Encoding.ASCII.GetBytes("#EXTM3U"));
+    }
+
+    public static bool IsValidHlsPlaylist(string playlist)
+    {
+        if (!playlist.TrimStart('\uFEFF', ' ', '\t', '\r', '\n').StartsWith("#EXTM3U", StringComparison.Ordinal))
+            return false;
+        return playlist.Contains("#EXTINF", StringComparison.Ordinal) ||
+            playlist.Contains("#EXT-X-STREAM-INF", StringComparison.OrdinalIgnoreCase) ||
+            playlist.Contains("#EXT-X-MEDIA", StringComparison.OrdinalIgnoreCase) ||
+            playlist.Contains("#EXT-X-PART", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsTransportStream(ReadOnlySpan<byte> data)
+    {
+        for (var offset = 0; offset + (188 * 2) < data.Length; offset++)
+        {
+            if (data[offset] != 0x47) continue;
+            var packetCount = 1;
+            while (offset + (packetCount * 188) < data.Length && data[offset + (packetCount * 188)] == 0x47)
+                packetCount++;
+            if (packetCount >= 3) return true;
+        }
+        return false;
+    }
+
+    private static bool IsIsoBaseMedia(ReadOnlySpan<byte> data)
+    {
+        if (data.Length < 8) return false;
+        var boxSize = BinaryPrimitives.ReadUInt32BigEndian(data[..4]);
+        if (boxSize is < 8 and not 0) return false;
+        var type = Encoding.ASCII.GetString(data.Slice(4, 4));
+        return type is "ftyp" or "styp" or "moof" or "moov" or "sidx" or "free" or "skip" or "mdat" or "emsg";
+    }
+
+    private static bool LooksLikeMpegAudioFrame(ReadOnlySpan<byte> data)
+    {
+        for (var index = 0; index + 1 < Math.Min(data.Length, 16); index++)
+        {
+            if (data[index] == 0xFF && (data[index + 1] & 0xE0) == 0xE0 && (data[index + 1] & 0x06) != 0)
+                return true;
+        }
+        return false;
+    }
+
+    private static bool LooksLikeAdts(ReadOnlySpan<byte> data) =>
+        data.Length >= 2 && data[0] == 0xFF && (data[1] & 0xF6) == 0xF0;
+
+    private static bool HasAsciiPrefix(ReadOnlySpan<byte> data, string value) =>
+        data.StartsWith(Encoding.ASCII.GetBytes(value));
+
+    private static bool HasBytes(ReadOnlySpan<byte> data, ReadOnlySpan<byte> prefix) =>
+        data.StartsWith(prefix);
+
     // Rewrite an HLS resource reference so the client fetches it through this API.
     public static string ProxyResource(string rawUrl, Uri parent, StreamSession session)
     {
-        if (!Uri.TryCreate(parent, rawUrl, out var target) || target.Scheme != Uri.UriSchemeHttps)
-            return rawUrl;
+        if (!Uri.TryCreate(parent, rawUrl, out var target) ||
+            target.Scheme != Uri.UriSchemeHttps ||
+            !string.IsNullOrEmpty(target.UserInfo))
+            throw new InvalidDataException("A media manifest referenced a non-HTTPS or invalid resource.");
 
         // HLS playlists normally use relative references, while capability URLs can carry a
         // short-lived token in the parent query. Relative resolution drops that query, so

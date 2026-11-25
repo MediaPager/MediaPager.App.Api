@@ -12,6 +12,7 @@
 
   <ItemGroup>
     <Compile Remove="tests/**/*.cs" />
+    <Content Remove="tests/**/*" />
   </ItemGroup>
 
   <ItemGroup>

@@ -8,7 +8,9 @@ namespace MediaPager.App.Api.Controllers;
 // provider failing must not sink the whole dropdown.
 [ApiController]
 [Route("search")]
-public sealed class SearchController(PluginRegistry registry) : ControllerBase
+public sealed class SearchController(
+    PluginRegistry registry,
+    PluginContentAccessService contentAccess) : ControllerBase
 {
     // GET /search?q=&limit=5 — top N matches fused across all search providers.
     [HttpGet]
@@ -37,25 +39,32 @@ public sealed class SearchController(PluginRegistry registry) : ControllerBase
         {
             try
             {
-                return await provider.SearchAsync(
+                var hits = await provider.SearchAsync(
                     new SearchRequest(query, resultLimit, supportedStreamKinds, mediaTypeSlug, catalogTypeSlug)
                     {
                         CatalogId = catalogId,
                     },
                     cancellationToken);
+                return (Provider: provider, Hits: hits);
             }
             catch
             {
-                return (IReadOnlyList<ProviderSearchHit>)Array.Empty<ProviderSearchHit>();
+                return (Provider: provider, Hits: (IReadOnlyList<ProviderSearchHit>)Array.Empty<ProviderSearchHit>());
             }
         }).ToList();
 
         await Task.WhenAll(tasks);
 
-        var providerHits = tasks.SelectMany(task => task.Result)
-            .Where(hit => MatchesScope(hit, mediaTypeSlug, catalogTypeSlug))
-            .Where(hit => catalogId is null || hit.CatalogId == catalogId)
-            .ToList();
+        var providerHits = new List<ProviderSearchHit>();
+        foreach (var result in tasks.Select(task => task.Result))
+        foreach (var hit in result.Hits)
+        {
+            if (!MatchesScope(hit, mediaTypeSlug, catalogTypeSlug) ||
+                catalogId is not null && hit.CatalogId != catalogId)
+                continue;
+            if (await contentAccess.CanAccessAsync(result.Provider, hit.RequiredScope, User, cancellationToken))
+                providerHits.Add(hit);
+        }
         var localHits = providerHits
             .Where(hit => hit.CatalogItemId is not null)
             .OrderByDescending(hit => hit.VoteAverage ?? 0)

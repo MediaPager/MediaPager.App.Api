@@ -154,6 +154,9 @@ namespace MediaPager.App.Api.Migrations.PostgreSql
                     b.Property<int>("CatalogId")
                         .HasColumnType("integer");
 
+                    b.Property<double?>("Confidence")
+                        .HasColumnType("double precision");
+
                     b.Property<string>("ContentRating")
                         .HasColumnType("text");
 
@@ -175,6 +178,9 @@ namespace MediaPager.App.Api.Migrations.PostgreSql
                     b.Property<string>("ExternalId")
                         .HasColumnType("text");
 
+                    b.Property<string>("Fingerprint")
+                        .HasColumnType("text");
+
                     b.Property<string>("ImageUrl")
                         .HasColumnType("text");
 
@@ -190,6 +196,12 @@ namespace MediaPager.App.Api.Migrations.PostgreSql
                     b.Property<string>("Kind")
                         .IsRequired()
                         .HasColumnType("text");
+
+                    b.Property<DateTimeOffset?>("LastScannedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateTimeOffset?>("LastSeenAt")
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<int>("MediaTypeId")
                         .HasColumnType("integer");
@@ -217,6 +229,9 @@ namespace MediaPager.App.Api.Migrations.PostgreSql
 
                     b.Property<double?>("Rating")
                         .HasColumnType("double precision");
+
+                    b.Property<string>("ScanSignature")
+                        .HasColumnType("text");
 
                     b.Property<string>("SeasonNumber")
                         .HasColumnType("text");
@@ -249,6 +264,8 @@ namespace MediaPager.App.Api.Migrations.PostgreSql
 
                     b.HasIndex("ExternalId");
 
+                    b.HasIndex("Fingerprint");
+
                     b.HasIndex("Kind");
 
                     b.HasIndex("MediaTypeId");
@@ -259,6 +276,8 @@ namespace MediaPager.App.Api.Migrations.PostgreSql
                         .IsUnique();
 
                     b.HasIndex("Title");
+
+                    b.HasIndex("CatalogId", "LastSeenAt");
 
                     b.HasIndex("CatalogId", "MediaTypeId");
 
@@ -439,6 +458,34 @@ namespace MediaPager.App.Api.Migrations.PostgreSql
                         .IsUnique();
 
                     b.ToTable("MediaTypes");
+                });
+
+            modelBuilder.Entity("MediaPager.App.Core.Models.PluginDataRow", b =>
+                {
+                    b.Property<string>("PluginId")
+                        .HasMaxLength(128)
+                        .HasColumnType("character varying(128)");
+
+                    b.Property<string>("Collection")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<string>("Key")
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)");
+
+                    b.Property<string>("Json")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<DateTimeOffset>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.HasKey("PluginId", "Collection", "Key");
+
+                    b.HasIndex("PluginId", "Collection", "UpdatedAt");
+
+                    b.ToTable("PluginData");
                 });
 
             modelBuilder.Entity("MediaPager.App.Core.Models.RegistrationInvite", b =>

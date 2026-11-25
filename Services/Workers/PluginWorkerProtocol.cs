@@ -34,12 +34,29 @@ internal sealed record PluginWorkerDescription(
     PluginActionDescriptor[] Actions,
     PluginSettingsNav? SettingsNav,
     PluginMenuEntry[] MainNav,
-    PluginScopeDefinition[] Scopes);
+    PluginScopeDefinition[] Scopes,
+    bool HasAgents = false,
+    AgentDescriptor[]? Agents = null,
+    bool HasSearchProvider = false,
+    PluginUserPreferenceDefinition[]? UserSettings = null);
 
 internal sealed record PluginWorkerResolveArguments(StreamResolveRequest Request);
 internal sealed record PluginWorkerBrowseArguments(string SourceKey, string? Query, int Page);
 internal sealed record PluginWorkerDetailsArguments(string SourceKey, string ExternalId);
 internal sealed record PluginWorkerActionArguments(PluginActionContext Context);
+internal sealed record PluginWorkerAgentRunArguments(AgentRunRequest Request);
+internal sealed record PluginWorkerSearchArguments(SearchRequest Request);
+internal sealed record PluginWorkerDataListArguments(string Collection, int Offset, int Limit);
+internal sealed record PluginWorkerDataGetArguments(string Collection, string Key);
+internal sealed record PluginWorkerDataReplaceArguments(string Collection, IReadOnlyList<PluginDataWrite> Documents);
+internal sealed record PluginWorkerDataUpsertArguments(string Collection, string Key, string Json);
+internal sealed record PluginWorkerDataDeleteArguments(string Collection, string Key);
+internal sealed record PluginWorkerPublicHttpFetchArguments(Uri Uri);
+internal sealed record PluginWorkerCatalogScanCatalogArguments(int CatalogId);
+internal sealed record PluginWorkerCatalogScanItemArguments(int ItemId);
+internal sealed record PluginWorkerCatalogScanPathArguments(string Path);
+internal sealed record PluginWorkerCatalogScanCreateArguments(CatalogScanCreateRequest Request);
+internal sealed record PluginWorkerCatalogScanUpdateArguments(int ItemId, CatalogScanIdentityUpdate Update);
 internal sealed record PluginWorkerNotifyArguments(string Title, string? Message, PluginNotificationLevel Level);
 internal sealed record PluginWorkerNotifyErrorArguments(string Title, PluginError Error, PluginNotificationLevel Level);
 internal sealed record PluginWorkerJobArguments(string JobId, string? Status = null, double? Progress = null, PluginError? Error = null);

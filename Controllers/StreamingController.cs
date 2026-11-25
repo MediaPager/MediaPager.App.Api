@@ -1,5 +1,6 @@
 using System.Text;
 using System.Text.RegularExpressions;
+using System.Net;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 
@@ -10,6 +11,8 @@ public sealed class StreamingController(
     IHttpClientFactory httpClientFactory,
     StreamSessionState sessions) : ControllerBase
 {
+    private const int MaximumUpstreamAttempts = 3;
+
     // GET /stream/{streamId}/{resourceId} — proxy a stream session through this API.
     [HttpGet("stream/{streamId}/{resourceId}")]
     [AllowAnonymous]
@@ -31,12 +34,25 @@ public sealed class StreamingController(
         var currentUri = upstreamUri;
         for (var redirectCount = 0; redirectCount <= 5; redirectCount++)
         {
-            using var upstreamRequest = new HttpRequestMessage(HttpMethod.Get, currentUri);
-            StreamingService.ApplyRequestHeaders(upstreamRequest, session.RequestHeaders);
-            if (Request.Headers.TryGetValue("Range", out var range))
-                upstreamRequest.Headers.TryAddWithoutValidation("Range", range.ToString());
-
-            upstreamResponse = await client.SendAsync(upstreamRequest, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+            try
+            {
+                upstreamResponse = await SendWithRetryAsync(
+                    client,
+                    currentUri,
+                    session.RequestHeaders,
+                    Request.Headers.TryGetValue("Range", out var range) ? range.ToString() : null,
+                    cancellationToken);
+            }
+            catch (HttpRequestException)
+            {
+                return Problem("The upstream media resource could not be reached after retries.",
+                    statusCode: StatusCodes.Status502BadGateway);
+            }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+            {
+                return Problem("The upstream media resource timed out after retries.",
+                    statusCode: StatusCodes.Status502BadGateway);
+            }
             if (!((int)upstreamResponse.StatusCode is >= 300 and < 400) || upstreamResponse.Headers.Location is null)
                 break;
 
@@ -53,41 +69,54 @@ public sealed class StreamingController(
 
         using (upstreamResponse)
         {
+            if (!upstreamResponse.IsSuccessStatusCode)
+                return Problem("The upstream did not return a successful media response.", statusCode: StatusCodes.Status502BadGateway);
+
             var mediaType = upstreamResponse.Content.Headers.ContentType?.MediaType ?? "application/octet-stream";
-            var declaredRootPlaylist = upstreamResponse.IsSuccessStatusCode &&
+            var declaredRootPlaylist =
                 resourceId == "root" &&
                 session.RootContentType?.Contains("mpegurl", StringComparison.OrdinalIgnoreCase) == true;
             var isPlaylist = currentUri.AbsolutePath.EndsWith(".m3u8", StringComparison.OrdinalIgnoreCase) ||
                 mediaType.Contains("mpegurl", StringComparison.OrdinalIgnoreCase) ||
                 declaredRootPlaylist;
 
-            // Extensionless HLS references can be given a synthetic extension for ffmpeg, and
-            // some upstreams label playlists as text/plain. Sniff the body before rewriting.
             await using var upstreamStream = await upstreamResponse.Content.ReadAsStreamAsync(cancellationToken);
-            var sniff = new byte[7];
-            var sniffRead = await upstreamStream.ReadAsync(sniff.AsMemory(0, sniff.Length), cancellationToken);
-            var looksLikePlaylist = sniffRead == sniff.Length &&
-                Encoding.ASCII.GetString(sniff) == "#EXTM3U";
+            var sniff = await ReadPrefixAsync(upstreamStream, StreamingService.MediaSniffBytes, cancellationToken);
+            var looksLikePlaylist = StreamingService.LooksLikeHlsPlaylist(sniff);
 
-            if (upstreamResponse.IsSuccessStatusCode && (isPlaylist || looksLikePlaylist))
+            if (isPlaylist || looksLikePlaylist)
             {
+                if (!looksLikePlaylist || upstreamResponse.Content.Headers.ContentLength is > StreamingService.MaximumPlaylistBytes)
+                    return Problem("The upstream response was not a valid supported media playlist.", statusCode: StatusCodes.Status502BadGateway);
+
                 using var buffer = new MemoryStream();
-                buffer.Write(sniff, 0, sniffRead);
-                await upstreamStream.CopyToAsync(buffer, cancellationToken);
+                buffer.Write(sniff);
+                if (!await CopyRemainingBoundedAsync(upstreamStream, buffer, StreamingService.MaximumPlaylistBytes, cancellationToken))
+                    return Problem("The upstream media playlist exceeded the size limit.", statusCode: StatusCodes.Status502BadGateway);
                 var playlist = Encoding.UTF8.GetString(buffer.ToArray());
+                if (!StreamingService.IsValidHlsPlaylist(playlist))
+                    return Problem("The upstream response did not contain a playable HLS playlist.", statusCode: StatusCodes.Status502BadGateway);
+
                 var lines = playlist.Replace("\r\n", "\n").Split('\n');
-                for (var index = 0; index < lines.Length; index++)
+                try
                 {
-                    if (lines[index].StartsWith('#'))
+                    for (var index = 0; index < lines.Length; index++)
                     {
-                        lines[index] = Regex.Replace(lines[index], "URI=\"([^\"]+)\"", match =>
-                            $"URI=\"{StreamingService.ProxyResource(match.Groups[1].Value, currentUri, session)}\"",
-                            RegexOptions.IgnoreCase);
+                        if (lines[index].StartsWith('#'))
+                        {
+                            lines[index] = Regex.Replace(lines[index], "URI=\"([^\"]+)\"", match =>
+                                $"URI=\"{StreamingService.ProxyResource(match.Groups[1].Value, currentUri, session)}\"",
+                                RegexOptions.IgnoreCase);
+                        }
+                        else if (!string.IsNullOrWhiteSpace(lines[index]))
+                        {
+                            lines[index] = StreamingService.ProxyResource(lines[index].Trim(), currentUri, session);
+                        }
                     }
-                    else if (!string.IsNullOrWhiteSpace(lines[index]))
-                    {
-                        lines[index] = StreamingService.ProxyResource(lines[index].Trim(), currentUri, session);
-                    }
+                }
+                catch (InvalidDataException)
+                {
+                    return Problem("The media playlist contains an unsupported or unsafe resource.", statusCode: StatusCodes.Status502BadGateway);
                 }
 
                 var rewritten = string.Join('\n', lines);
@@ -102,24 +131,18 @@ public sealed class StreamingController(
                 return new EmptyResult();
             }
 
+            if (!StreamingService.TryClassifyMediaPayload(
+                    currentUri,
+                    mediaType,
+                    sniff,
+                    allowHlsAuxiliaryResource: resourceId != "root",
+                    upstreamResponse.Content.Headers.ContentLength,
+                    out var validatedContentType))
+                return Problem("The upstream response was not a recognized supported media stream.",
+                    statusCode: StatusCodes.Status502BadGateway);
+
             Response.StatusCode = (int)upstreamResponse.StatusCode;
-            // The upstream often mislabels media segments as text/html, which makes the browser's
-            // HLS engine reject them. Serve a correct media type by path, falling back to binary.
-            var segmentPath = currentUri.AbsolutePath.ToLowerInvariant();
-            Response.ContentType = upstreamResponse.IsSuccessStatusCode &&
-                resourceId == "root" && !string.IsNullOrWhiteSpace(session.RootContentType)
-                ? session.RootContentType
-                : segmentPath switch
-            {
-                _ when segmentPath.EndsWith(".ts") => "video/mp2t",
-                _ when segmentPath.EndsWith(".m4s") || segmentPath.EndsWith(".mp4") || segmentPath.EndsWith(".cmfv") => "video/mp4",
-                _ when segmentPath.EndsWith(".m4a") || segmentPath.EndsWith(".aac") || segmentPath.EndsWith(".cmfa") => "audio/mp4",
-                _ when segmentPath.EndsWith(".key") || segmentPath.EndsWith(".bin") => "application/octet-stream",
-                _ when segmentPath.EndsWith(".vtt") => "text/vtt",
-                _ => upstreamResponse.Content.Headers.ContentType?.MediaType?.Contains("html", StringComparison.OrdinalIgnoreCase) == true
-                    ? "application/octet-stream"
-                    : upstreamResponse.Content.Headers.ContentType?.ToString() ?? "application/octet-stream",
-            };
+            Response.ContentType = validatedContentType;
             if (upstreamResponse.Content.Headers.ContentLength is long contentLength)
                 Response.ContentLength = contentLength;
             if (upstreamResponse.Content.Headers.ContentRange is not null)
@@ -127,9 +150,88 @@ public sealed class StreamingController(
             if (upstreamResponse.Headers.AcceptRanges.Count > 0)
                 Response.Headers.AcceptRanges = string.Join(", ", upstreamResponse.Headers.AcceptRanges);
 
-            await Response.Body.WriteAsync(sniff.AsMemory(0, sniffRead), cancellationToken);
+            await Response.Body.WriteAsync(sniff, cancellationToken);
             await upstreamStream.CopyToAsync(Response.Body, cancellationToken);
             return new EmptyResult();
+        }
+    }
+
+    internal static async Task<HttpResponseMessage> SendWithRetryAsync(
+        HttpClient client,
+        Uri uri,
+        IReadOnlyDictionary<string, string> requestHeaders,
+        string? rangeHeader,
+        CancellationToken cancellationToken)
+    {
+        for (var attempt = 1; ; attempt++)
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Get, uri);
+            StreamingService.ApplyRequestHeaders(request, requestHeaders);
+            if (!string.IsNullOrWhiteSpace(rangeHeader))
+                request.Headers.TryAddWithoutValidation("Range", rangeHeader);
+
+            HttpResponseMessage response;
+            try
+            {
+                response = await client.SendAsync(
+                    request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+            }
+            catch (HttpRequestException) when (attempt < MaximumUpstreamAttempts)
+            {
+                await Task.Delay(RetryDelay(attempt), cancellationToken);
+                continue;
+            }
+            catch (OperationCanceledException) when (
+                !cancellationToken.IsCancellationRequested && attempt < MaximumUpstreamAttempts)
+            {
+                await Task.Delay(RetryDelay(attempt), cancellationToken);
+                continue;
+            }
+
+            if (attempt >= MaximumUpstreamAttempts || !IsTransient(response.StatusCode))
+                return response;
+
+            var retryAfter = response.Headers.RetryAfter?.Delta;
+            response.Dispose();
+            await Task.Delay(retryAfter is { } delay && delay > TimeSpan.Zero
+                ? TimeSpan.FromMilliseconds(Math.Min(delay.TotalMilliseconds, 1_000))
+                : RetryDelay(attempt), cancellationToken);
+        }
+    }
+
+    private static bool IsTransient(HttpStatusCode statusCode) =>
+        statusCode is HttpStatusCode.RequestTimeout or HttpStatusCode.TooManyRequests ||
+        (int)statusCode is >= 500 and <= 599;
+
+    private static TimeSpan RetryDelay(int attempt) =>
+        TimeSpan.FromMilliseconds(attempt == 1 ? 150 : 350);
+
+    private static async Task<byte[]> ReadPrefixAsync(Stream stream, int maximumBytes, CancellationToken cancellationToken)
+    {
+        var buffer = new byte[maximumBytes];
+        var total = 0;
+        while (total < buffer.Length)
+        {
+            var read = await stream.ReadAsync(buffer.AsMemory(total), cancellationToken);
+            if (read == 0) break;
+            total += read;
+        }
+        return buffer.AsSpan(0, total).ToArray();
+    }
+
+    private static async Task<bool> CopyRemainingBoundedAsync(
+        Stream source,
+        Stream destination,
+        int maximumBytes,
+        CancellationToken cancellationToken)
+    {
+        var buffer = new byte[16 * 1024];
+        while (true)
+        {
+            var read = await source.ReadAsync(buffer.AsMemory(), cancellationToken);
+            if (read == 0) return true;
+            if (destination.Length + read > maximumBytes) return false;
+            await destination.WriteAsync(buffer.AsMemory(0, read), cancellationToken);
         }
     }
 }

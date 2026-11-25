@@ -43,6 +43,7 @@ public sealed class PluginCatalogInteropCapability(PluginRegistry registry) : II
         plugin is ISubtitleProviderPlugin ? "subtitles" : null,
         plugin is IEmailProviderPlugin ? "email" : null,
         plugin is IPluginActions ? "actions" : null,
+        plugin is IAgentPlugin ? "agents" : null,
         plugin is IPluginInterface ? "interface" : null,
     }.Where(capability => capability is not null).ToArray()!;
 }

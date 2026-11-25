@@ -90,9 +90,12 @@ internal static class PluginWorkerCommand
             var stream = plugins[0] as IStreamProviderPlugin;
             var schema = plugins[0] as IPluginSettingsSchema;
             var actionProvider = plugins[0] as IPluginActions;
+            var agentProvider = plugins[0] as IAgentPlugin;
+            var searchProvider = plugins[0] as ISearchProviderPlugin;
             var navigation = plugins[0] as IPluginNavigation;
             var scopeSchema = plugins[0] as IPluginScopeSchema;
-            if (stream is null && actionProvider is null)
+            var userSettingsSchema = plugins[0] as IPluginUserSettingsSchema;
+            if (stream is null && actionProvider is null && agentProvider is null && searchProvider is null)
                 throw new InvalidOperationException($"Worker '{pluginId}' does not expose a supported capability.");
 
             // Start the duplex pipe reader before querying plugin actions: some plugins
@@ -102,6 +105,9 @@ internal static class PluginWorkerCommand
             var actions = actionProvider is null
                 ? []
                 : (await actionProvider.GetActionsAsync(CancellationToken.None)).ToArray();
+            var agents = agentProvider is null
+                ? []
+                : (await agentProvider.GetAgentsAsync(CancellationToken.None)).ToArray();
             Console.Error.WriteLine($"[plugin-worker:{pluginId}] prepared worker description.");
             var description = new PluginWorkerDescription(
                 workerPlugin.Descriptor,
@@ -116,7 +122,11 @@ internal static class PluginWorkerCommand
                 actions,
                 navigation?.SettingsNav,
                 navigation?.MainNav.ToArray() ?? [],
-                scopeSchema?.Scopes.ToArray() ?? []);
+                scopeSchema?.Scopes.ToArray() ?? [],
+                agentProvider is not null,
+                agents,
+                searchProvider is not null,
+                userSettingsSchema?.UserSettings.ToArray() ?? []);
             await host.SendAsync(new PluginWorkerMessage(
                 "ready", "ready", Result: PluginWorkerJson.ToElement(description)));
             Console.Error.WriteLine($"[plugin-worker:{pluginId}] sent worker ready message.");
@@ -179,7 +189,7 @@ internal static class PluginWorkerCommand
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool SetProcessMitigationPolicy(int mitigationPolicy, ref uint policy, nuint length);
 
-    private static async Task<JsonElement> DispatchAsync(
+    internal static async Task<JsonElement> DispatchAsync(
         IMediaPagerPlugin mediaPlugin,
         PluginWorkerMessage request,
         CancellationToken cancellationToken)
@@ -191,9 +201,18 @@ internal static class PluginWorkerCommand
                 PluginWorkerJson.Deserialize<PluginWorkerDetailsArguments>(request.Arguments), cancellationToken),
             "stream.resolve" when mediaPlugin is IStreamProviderPlugin stream => await DispatchResolveAsync(stream,
                 PluginWorkerJson.Deserialize<PluginWorkerResolveArguments>(request.Arguments), cancellationToken),
-            "actions.list" when mediaPlugin is IPluginActions actionProvider =>
-                await actionProvider.GetActionsAsync(cancellationToken),
+            // Worker proxies expose IPluginActions uniformly so the host can query dynamic
+            // availability. A plugin with no action capability has an empty action list;
+            // treat that optional query as such rather than failing the entire sources/plugins
+            // payload. Invocations still require the actual capability below.
+            "actions.list" => mediaPlugin is IPluginActions actionProvider
+                ? await actionProvider.GetActionsAsync(cancellationToken)
+                : Array.Empty<PluginActionDescriptor>(),
             "actions.invoke" when mediaPlugin is IPluginActions actions => await DispatchActionAsync(actions, request, cancellationToken),
+            "agents.list" when mediaPlugin is IAgentPlugin agentProvider =>
+                await agentProvider.GetAgentsAsync(cancellationToken),
+            "agents.run" when mediaPlugin is IAgentPlugin agent => await DispatchAgentRunAsync(agent, request, cancellationToken),
+            "search.run" when mediaPlugin is ISearchProviderPlugin search => await DispatchSearchAsync(search, request, cancellationToken),
             _ => throw new InvalidOperationException($"Unsupported worker operation '{request.Operation}'."),
         };
         return PluginWorkerJson.ToElement(result);
@@ -229,6 +248,24 @@ internal static class PluginWorkerCommand
             PluginWorkerJson.Deserialize<PluginWorkerActionArguments>(request.Arguments).Context,
             cancellationToken);
         return true;
+    }
+
+    private static Task<AgentRunResult> DispatchAgentRunAsync(
+        IAgentPlugin agents,
+        PluginWorkerMessage request,
+        CancellationToken cancellationToken)
+    {
+        var arguments = PluginWorkerJson.Deserialize<PluginWorkerAgentRunArguments>(request.Arguments);
+        return agents.RunAsync(arguments.Request, cancellationToken);
+    }
+
+    private static Task<IReadOnlyList<ProviderSearchHit>> DispatchSearchAsync(
+        ISearchProviderPlugin plugin,
+        PluginWorkerMessage request,
+        CancellationToken cancellationToken)
+    {
+        var arguments = PluginWorkerJson.Deserialize<PluginWorkerSearchArguments>(request.Arguments);
+        return plugin.SearchAsync(arguments.Request, cancellationToken);
     }
 }
 
@@ -476,6 +513,113 @@ internal sealed class WorkerPluginEmailSender(PluginWorkerHostClient host) : IPl
         host.CallHostAsync<bool>("email.sending", "send", new PluginWorkerEmailArguments(message), cancellationToken);
 }
 
+internal sealed class WorkerPluginPublicHttpBroker(PluginWorkerHostClient host) : IPluginPublicHttpBroker
+{
+    public Task<PluginPublicHttpResponse> GetAsync(Uri uri, CancellationToken cancellationToken = default) =>
+        host.CallHostAsync<PluginPublicHttpResponse>("public.http", "get",
+            new PluginWorkerPublicHttpFetchArguments(uri), cancellationToken);
+}
+
+/// <summary>Worker-side proxy for the host's catalog-scanning service. The host performs every
+/// containment check and database write; this class only forwards typed RPC calls.</summary>
+internal sealed class WorkerCatalogScanStore(PluginWorkerHostClient host) : ICatalogScanStore
+{
+    public Task<IReadOnlyList<CatalogScanCatalogInfo>> ListCatalogsAsync(CancellationToken cancellationToken = default) =>
+        host.CallHostAsync<IReadOnlyList<CatalogScanCatalogInfo>>("catalog.scanning", "list-catalogs", new { }, cancellationToken);
+
+    public Task<CatalogScanCatalogInfo?> GetCatalogAsync(int catalogId, CancellationToken cancellationToken = default) =>
+        host.CallHostAsync<CatalogScanCatalogInfo?>("catalog.scanning", "get-catalog",
+            new PluginWorkerCatalogScanCatalogArguments(catalogId), cancellationToken);
+
+    public Task<IReadOnlyList<CatalogScanItemInfo>> ListItemsAsync(int catalogId, CancellationToken cancellationToken = default) =>
+        host.CallHostAsync<IReadOnlyList<CatalogScanItemInfo>>("catalog.scanning", "list-items",
+            new PluginWorkerCatalogScanCatalogArguments(catalogId), cancellationToken);
+
+    public Task<CatalogScanItemInfo?> FindByPathAsync(string path, CancellationToken cancellationToken = default) =>
+        host.CallHostAsync<CatalogScanItemInfo?>("catalog.scanning", "find-by-path",
+            new PluginWorkerCatalogScanPathArguments(path), cancellationToken);
+
+    public async Task<int> CreateAsync(CatalogScanCreateRequest request, CancellationToken cancellationToken = default) =>
+        await host.CallHostAsync<int>("catalog.scanning", "create",
+            new PluginWorkerCatalogScanCreateArguments(request), cancellationToken);
+
+    public async Task UpdateAsync(int itemId, CatalogScanIdentityUpdate update, CancellationToken cancellationToken = default) =>
+        _ = await host.CallHostAsync<bool>("catalog.scanning", "update",
+            new PluginWorkerCatalogScanUpdateArguments(itemId, update), cancellationToken);
+
+    public async Task DeleteAsync(int itemId, CancellationToken cancellationToken = default) =>
+        _ = await host.CallHostAsync<bool>("catalog.scanning", "delete",
+            new PluginWorkerCatalogScanItemArguments(itemId), cancellationToken);
+}
+
+internal sealed class WorkerPluginDataStore(PluginWorkerHostClient host, string pluginId) : IPluginDataStore
+{
+    private readonly string _pluginKey = pluginId.Split('.')[^1];
+
+    public Task<PluginDataPage> ListAsync(
+        string pluginKey,
+        string collection,
+        int offset = 0,
+        int limit = 250,
+        CancellationToken cancellationToken = default)
+    {
+        EnsureOwnNamespace(pluginKey);
+        return host.CallHostAsync<PluginDataPage>("plugin.data", "list",
+            new PluginWorkerDataListArguments(collection, offset, limit), cancellationToken);
+    }
+
+    public Task<PluginDataDocument?> GetAsync(
+        string pluginKey,
+        string collection,
+        string key,
+        CancellationToken cancellationToken = default)
+    {
+        EnsureOwnNamespace(pluginKey);
+        return host.CallHostAsync<PluginDataDocument?>("plugin.data", "get",
+            new PluginWorkerDataGetArguments(collection, key), cancellationToken);
+    }
+
+    public Task ReplaceCollectionAsync(
+        string pluginKey,
+        string collection,
+        IReadOnlyList<PluginDataWrite> documents,
+        CancellationToken cancellationToken = default)
+    {
+        EnsureOwnNamespace(pluginKey);
+        return host.CallHostAsync<bool>("plugin.data", "replace",
+            new PluginWorkerDataReplaceArguments(collection, documents), cancellationToken);
+    }
+
+    public Task UpsertAsync(
+        string pluginKey,
+        string collection,
+        string key,
+        string json,
+        CancellationToken cancellationToken = default)
+    {
+        EnsureOwnNamespace(pluginKey);
+        return host.CallHostAsync<bool>("plugin.data", "upsert",
+            new PluginWorkerDataUpsertArguments(collection, key, json), cancellationToken);
+    }
+
+    public Task DeleteAsync(
+        string pluginKey,
+        string collection,
+        string key,
+        CancellationToken cancellationToken = default)
+    {
+        EnsureOwnNamespace(pluginKey);
+        return host.CallHostAsync<bool>("plugin.data", "delete",
+            new PluginWorkerDataDeleteArguments(collection, key), cancellationToken);
+    }
+
+    private void EnsureOwnNamespace(string pluginKey)
+    {
+        if (!string.Equals(pluginKey, _pluginKey, StringComparison.OrdinalIgnoreCase))
+            throw new UnauthorizedAccessException($"Plugin '{pluginId}' may only access its own data namespace.");
+    }
+}
+
 internal sealed class WorkerMediaToolBroker(PluginWorkerHostClient host) : IMediaToolBroker
 {
     public Task<bool> IsDestinationAvailableAsync(int catalogId, string catalogTypeSlug, CancellationToken cancellationToken = default) =>
@@ -514,6 +658,9 @@ internal sealed class PluginWorkerServiceProvider(
     private readonly IPluginActivity _activity = host.Activity;
     private readonly IMediaToolBroker _mediaTools = host.MediaTools;
     private readonly IPluginEmailSender _emailSender = new WorkerPluginEmailSender(host);
+    private readonly ICatalogScanStore _catalogScanStore = new WorkerCatalogScanStore(host);
+    private readonly IPluginDataStore _pluginDataStore = new WorkerPluginDataStore(host, pluginId);
+    private readonly IPluginPublicHttpBroker _publicHttpBroker = new WorkerPluginPublicHttpBroker(host);
 
     public object? GetService(Type serviceType)
     {
@@ -525,6 +672,12 @@ internal sealed class PluginWorkerServiceProvider(
             return hostCapabilities.Contains(PluginHostCapabilityNames.MediaTools) ? _mediaTools : null;
         if (serviceType == typeof(IPluginEmailSender))
             return hostCapabilities.Contains(PluginHostCapabilityNames.EmailSending) ? _emailSender : null;
+        if (serviceType == typeof(ICatalogScanStore))
+            return hostCapabilities.Contains(PluginHostCapabilityNames.CatalogScanning) ? _catalogScanStore : null;
+        if (serviceType == typeof(IPluginDataStore))
+            return hostCapabilities.Contains(PluginHostCapabilityNames.PluginData) ? _pluginDataStore : null;
+        if (serviceType == typeof(IPluginPublicHttpBroker))
+            return hostCapabilities.Contains(PluginHostCapabilityNames.PublicHttpFetch) ? _publicHttpBroker : null;
         if (serviceType == typeof(IServiceProvider)) return this;
         if (serviceType == typeof(IServiceProviderIsService)) return this;
         return null;
@@ -536,6 +689,9 @@ internal sealed class PluginWorkerServiceProvider(
         serviceType == typeof(IPluginActivity) ||
         serviceType == typeof(IMediaToolBroker) && hostCapabilities.Contains(PluginHostCapabilityNames.MediaTools) ||
         serviceType == typeof(IPluginEmailSender) && hostCapabilities.Contains(PluginHostCapabilityNames.EmailSending) ||
+        serviceType == typeof(ICatalogScanStore) && hostCapabilities.Contains(PluginHostCapabilityNames.CatalogScanning) ||
+        serviceType == typeof(IPluginDataStore) && hostCapabilities.Contains(PluginHostCapabilityNames.PluginData) ||
+        serviceType == typeof(IPluginPublicHttpBroker) && hostCapabilities.Contains(PluginHostCapabilityNames.PublicHttpFetch) ||
         serviceType == typeof(IServiceProvider) ||
         serviceType == typeof(IServiceProviderIsService);
 }

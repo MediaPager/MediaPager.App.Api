@@ -21,6 +21,9 @@ internal sealed class PluginWorkerProcess : IDisposable
     private readonly IBrowserAutomationBroker _browser;
     private readonly IMediaToolBroker _mediaTools;
     private readonly IPluginEmailSender? _emailSender;
+    private readonly ICatalogScanStore? _catalogScanStore;
+    private readonly IPluginDataRepository? _pluginDataRepository;
+    private readonly IPluginPublicHttpBroker? _publicHttpBroker;
     private readonly IReadOnlySet<string> _hostCapabilities;
     private readonly Action<string> _cancelHostJob;
     private readonly ILogger _logger;
@@ -51,7 +54,10 @@ internal sealed class PluginWorkerProcess : IDisposable
         IPluginEmailSender? emailSender,
         IReadOnlySet<string> hostCapabilities,
         Action<string> cancelHostJob,
-        ILogger logger)
+        ILogger logger,
+        ICatalogScanStore? catalogScanStore = null,
+        IPluginDataRepository? pluginDataRepository = null,
+        IPluginPublicHttpBroker? publicHttpBroker = null)
     {
         _pluginId = pluginId;
         _settingsKey = pluginId.Split('.')[^1];
@@ -61,6 +67,15 @@ internal sealed class PluginWorkerProcess : IDisposable
         _mediaTools = mediaTools;
         _emailSender = emailSender;
         _hostCapabilities = new HashSet<string>(hostCapabilities, StringComparer.OrdinalIgnoreCase);
+        _catalogScanStore = _hostCapabilities.Contains(PluginHostCapabilityNames.CatalogScanning)
+            ? catalogScanStore
+            : null;
+        _pluginDataRepository = _hostCapabilities.Contains(PluginHostCapabilityNames.PluginData)
+            ? pluginDataRepository
+            : null;
+        _publicHttpBroker = _hostCapabilities.Contains(PluginHostCapabilityNames.PublicHttpFetch)
+            ? publicHttpBroker
+            : null;
         _cancelHostJob = cancelHostJob;
         _logger = logger;
         _workerHome = Path.Combine(Path.GetTempPath(), "mediapager-workers",
@@ -287,7 +302,115 @@ internal sealed class PluginWorkerProcess : IDisposable
             return PluginWorkerJson.ToElement(await _emailSender.SendAsync(request.Message, cancellationToken));
         }
 
+        if (message.Capability == "catalog.scanning" &&
+            _hostCapabilities.Contains(PluginHostCapabilityNames.CatalogScanning) &&
+            _catalogScanStore is not null)
+            return await DispatchCatalogScanCallAsync(message, cancellationToken);
+
+        if (message.Capability == "plugin.data" &&
+            _hostCapabilities.Contains(PluginHostCapabilityNames.PluginData) &&
+            _pluginDataRepository is not null)
+            return await DispatchPluginDataCallAsync(message, cancellationToken);
+
+        if (message.Capability == "public.http" &&
+            _hostCapabilities.Contains(PluginHostCapabilityNames.PublicHttpFetch) &&
+            _publicHttpBroker is not null)
+        {
+            if (message.Operation != "get")
+                throw new PluginOperationException(new PluginError("plugin.http.operation", "Unsupported public HTTP operation."));
+            var request = PluginWorkerJson.Deserialize<PluginWorkerPublicHttpFetchArguments>(message.Arguments);
+            return PluginWorkerJson.ToElement(await _publicHttpBroker.GetAsync(request.Uri, cancellationToken));
+        }
+
         throw new PluginOperationException(new PluginError("plugin.capability.denied", "The host did not grant this capability."));
+    }
+
+    private async Task<JsonElement> DispatchPluginDataCallAsync(
+        PluginWorkerMessage message,
+        CancellationToken cancellationToken)
+    {
+        var repository = _pluginDataRepository!;
+        switch (message.Operation)
+        {
+            case "list":
+            {
+                var request = PluginWorkerJson.Deserialize<PluginWorkerDataListArguments>(message.Arguments);
+                return PluginWorkerJson.ToElement(await repository.ListAsync(
+                    _pluginId, request.Collection, request.Offset, request.Limit, cancellationToken));
+            }
+            case "get":
+            {
+                var request = PluginWorkerJson.Deserialize<PluginWorkerDataGetArguments>(message.Arguments);
+                return PluginWorkerJson.ToElement(await repository.GetAsync(
+                    _pluginId, request.Collection, request.Key, cancellationToken));
+            }
+            case "replace":
+            {
+                var request = PluginWorkerJson.Deserialize<PluginWorkerDataReplaceArguments>(message.Arguments);
+                await repository.ReplaceCollectionAsync(_pluginId, request.Collection, request.Documents, cancellationToken);
+                return PluginWorkerJson.ToElement(true);
+            }
+            case "upsert":
+            {
+                var request = PluginWorkerJson.Deserialize<PluginWorkerDataUpsertArguments>(message.Arguments);
+                await repository.UpsertAsync(_pluginId, request.Collection, request.Key, request.Json, cancellationToken);
+                return PluginWorkerJson.ToElement(true);
+            }
+            case "delete":
+            {
+                var request = PluginWorkerJson.Deserialize<PluginWorkerDataDeleteArguments>(message.Arguments);
+                await repository.DeleteAsync(_pluginId, request.Collection, request.Key, cancellationToken);
+                return PluginWorkerJson.ToElement(true);
+            }
+            default:
+                throw new PluginOperationException(new PluginError("plugin.data.operation", "Unsupported plugin-data operation."));
+        }
+    }
+
+    private async Task<JsonElement> DispatchCatalogScanCallAsync(
+        PluginWorkerMessage message,
+        CancellationToken cancellationToken)
+    {
+        var store = _catalogScanStore!;
+        return message.Operation switch
+        {
+            "list-catalogs" => PluginWorkerJson.ToElement(await store.ListCatalogsAsync(cancellationToken)),
+            "get-catalog" => PluginWorkerJson.ToElement(await store.GetCatalogAsync(
+                PluginWorkerJson.Deserialize<PluginWorkerCatalogScanCatalogArguments>(message.Arguments).CatalogId,
+                cancellationToken)),
+            "list-items" => PluginWorkerJson.ToElement(await store.ListItemsAsync(
+                PluginWorkerJson.Deserialize<PluginWorkerCatalogScanCatalogArguments>(message.Arguments).CatalogId,
+                cancellationToken)),
+            "find-by-path" => PluginWorkerJson.ToElement(await store.FindByPathAsync(
+                PluginWorkerJson.Deserialize<PluginWorkerCatalogScanPathArguments>(message.Arguments).Path,
+                cancellationToken)),
+            "create" => PluginWorkerJson.ToElement(await store.CreateAsync(
+                PluginWorkerJson.Deserialize<PluginWorkerCatalogScanCreateArguments>(message.Arguments).Request,
+                cancellationToken)),
+            "update" => await UpdateCatalogScanItemAsync(message, store, cancellationToken),
+            "delete" => await DeleteCatalogScanItemAsync(message, store, cancellationToken),
+            _ => throw new PluginOperationException(new PluginError("catalog.scanning.operation", "Unsupported catalog-scanning operation.")),
+        };
+    }
+
+    private async Task<JsonElement> UpdateCatalogScanItemAsync(
+        PluginWorkerMessage message,
+        ICatalogScanStore store,
+        CancellationToken cancellationToken)
+    {
+        var request = PluginWorkerJson.Deserialize<PluginWorkerCatalogScanUpdateArguments>(message.Arguments);
+        await store.UpdateAsync(request.ItemId, request.Update, cancellationToken);
+        return PluginWorkerJson.ToElement(true);
+    }
+
+    private async Task<JsonElement> DeleteCatalogScanItemAsync(
+        PluginWorkerMessage message,
+        ICatalogScanStore store,
+        CancellationToken cancellationToken)
+    {
+        var request = PluginWorkerJson.Deserialize<PluginWorkerCatalogScanItemArguments>(message.Arguments);
+        await store.DeleteAsync(request.ItemId, cancellationToken);
+        return PluginWorkerJson.ToElement(true);
     }
 
     private async Task<JsonElement> GetPublicTextResultAsync(

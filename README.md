@@ -32,6 +32,10 @@ authoritative until the Phase 5 cut-over.
 - `POST /plugins/{key}/actions/{actionId}` — generic dispatch to a plugin-declared action.
 - `GET /plugins/activity` — plugin-raised jobs and notifications; cancel/clear/dismiss endpoints
   live under `/plugins/activity` as well.
+- **Agents** are plugins with the `agents` type that perform recurring catalog work (for
+  example, reconciling library entries against a catalog folder). The host schedules them and
+  grants catalog state access only when the manifest declares the `catalog-scanning` host
+  capability; agent runs and results surface through the plugin activity endpoints above.
 - `GET /sources/{key}/browse` — one page of a stream source's catalog.
 - `GET /sources/{key}/details/{externalId}` — a stream source's detail-sheet payload.
 - `GET` / `PUT /plugins/{key}/settings` — data-driven plugin settings (admin). Writes are

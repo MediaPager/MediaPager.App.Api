@@ -179,17 +179,14 @@ public sealed class PluginJobsService(
         return branch;
     }
 
-    /// <summary>Turn an official plugin off: drop it from Plugins:Required:Official in
-    /// appsettings.json and unregister it. Files stay put; the next boot skips it too.</summary>
+    /// <summary>Turn a plugin off without uninstalling it. Community plugins are marked
+    /// disabled in their install folder; official plugins are removed from the required set.</summary>
     public string Disable(string key)
     {
         var plugin = registry.Plugins.FirstOrDefault(candidate =>
             string.Equals(candidate.Descriptor.Id, key, StringComparison.OrdinalIgnoreCase));
         if (plugin is null)
             throw new KeyNotFoundException($"No plugin '{key}' is active.");
-        if (registry.IsCommunity(plugin))
-            throw new InvalidOperationException(
-                $"'{plugin.Descriptor.Name}' is a community plugin — uninstall it instead.");
         if (PluginCatalog.IsSystemRequired(configuration, plugin.Descriptor.Id))
             throw new InvalidOperationException(
                 $"'{plugin.Descriptor.Name}' is required by the system and cannot be turned off.");
@@ -201,9 +198,120 @@ public sealed class PluginJobsService(
                 + string.Join(", ", dependents.Select(dependent => dependent.Descriptor.Name))
                 + ". Turn off its dependents first.");
 
+        if (registry.IsCommunity(plugin))
+        {
+            var directory = CommunityPluginDirectory(plugin);
+            if (directory is null)
+                throw new InvalidOperationException(
+                    $"Could not locate the installed files for '{plugin.Descriptor.Name}'.");
+
+            var marker = Path.Combine(directory, ".disabled");
+            var markerAlreadyExisted = File.Exists(marker);
+            if (!markerAlreadyExisted)
+                File.WriteAllText(marker, string.Empty);
+
+            if (!registry.Unload(plugin.Descriptor.Id))
+            {
+                if (!markerAlreadyExisted)
+                    File.Delete(marker);
+                throw new InvalidOperationException(
+                    $"'{plugin.Descriptor.Name}' is still required by another loaded plugin.");
+            }
+
+            return $"{plugin.Descriptor.Name} is off. Its installed files are kept; turn it on to load it again.";
+        }
+
         SetOfficialRequired(plugin.Descriptor.Id, false);
-        registry.Unload(plugin.Descriptor.Id);
+        if (!registry.Unload(plugin.Descriptor.Id))
+        {
+            SetOfficialRequired(plugin.Descriptor.Id, true);
+            throw new InvalidOperationException(
+                $"'{plugin.Descriptor.Name}' is still required by another loaded plugin.");
+        }
         return $"{plugin.Descriptor.Name} is off. It stays off after a restart until you turn it on again.";
+    }
+
+    /// <summary>Uninstall an installed community plugin that is not currently loaded,
+    /// such as one turned off with the .disabled marker. The manifest is used to identify
+    /// the package inside the community directory; deletion is finalized by the API restart.</summary>
+    public string UninstallDisabledCommunityPlugin(string key, bool removeDependencies = false)
+    {
+        var installed = FindInstalledCommunityPlugin(key);
+        if (installed is null)
+            throw new KeyNotFoundException($"No installed community plugin '{key}' was found.");
+        if (PluginCatalog.IsSystemRequired(configuration, installed.Manifest.Id))
+            throw new InvalidOperationException(
+                $"'{installed.Manifest.Name}' is required by the system and cannot be uninstalled.");
+
+        var dependents = registry.GetDependents(installed.Manifest.Id);
+        if (dependents.Count > 0)
+            throw new InvalidOperationException(
+                $"Cannot uninstall '{installed.Manifest.Name}' while required by: "
+                + string.Join(", ", dependents.Select(dependent => dependent.Descriptor.Name))
+                + ". Turn off its dependents first.");
+
+        if (removeDependencies && installed.Manifest.Requires is { Count: > 0 })
+            throw new InvalidOperationException(
+                $"'{installed.Manifest.Name}' is already off. Its dependency graph is not loaded, "
+                + "so dependencies will be kept. Turn it on before requesting dependency removal.");
+
+        ApiRestartBootstrapper.RemoveOrSchedule(installed.Directory);
+        return installed.Manifest.Name;
+    }
+
+    private InstalledCommunityPlugin? FindInstalledCommunityPlugin(string key)
+    {
+        var communityRoot = Path.TrimEndingDirectorySeparator(
+            Path.GetFullPath(PluginDirectories.Community(configuration)));
+        if (!Directory.Exists(communityRoot)) return null;
+
+        foreach (var directory in Directory.EnumerateDirectories(communityRoot))
+        {
+            var fullPath = Path.GetFullPath(directory);
+            var info = new DirectoryInfo(fullPath);
+            if ((info.Attributes & FileAttributes.ReparsePoint) != 0) continue;
+            var relative = Path.GetRelativePath(communityRoot, fullPath);
+            if (relative is "." or ".." || relative.StartsWith($"..{Path.DirectorySeparatorChar}", StringComparison.Ordinal))
+                continue;
+
+            var assembly = Path.GetFileName(fullPath);
+            if (!File.Exists(Path.Combine(fullPath, $"{assembly}.dll"))) continue;
+            var manifestFiles = Directory.GetFiles(fullPath, "*.manifest.json", SearchOption.TopDirectoryOnly);
+            if (manifestFiles.Length != 1) continue;
+
+            PluginManifest manifest;
+            try
+            {
+                manifest = PluginManifestFile.Parse(File.ReadAllText(manifestFiles[0]));
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidOperationException)
+            {
+                continue;
+            }
+
+            var shortId = manifest.Id[(manifest.Id.LastIndexOf('.') + 1)..];
+            if (!string.Equals(manifest.Id, key, StringComparison.OrdinalIgnoreCase) &&
+                !string.Equals(shortId, key, StringComparison.OrdinalIgnoreCase))
+                continue;
+            return new InstalledCommunityPlugin(manifest, fullPath);
+        }
+        return null;
+    }
+
+    private string? CommunityPluginDirectory(IMediaPagerPlugin plugin)
+    {
+        var directory = plugin is IPluginUiAssetProvider assets
+            ? Directory.GetParent(Path.GetFullPath(assets.PluginUiDirectory))?.FullName
+            : Path.GetDirectoryName(Path.GetFullPath(plugin.GetType().Assembly.Location));
+        if (string.IsNullOrWhiteSpace(directory) || !Directory.Exists(directory)) return null;
+
+        var communityRoot = Path.TrimEndingDirectorySeparator(
+            Path.GetFullPath(PluginDirectories.Community(configuration)));
+        var relative = Path.GetRelativePath(communityRoot, Path.GetFullPath(directory));
+        if (relative is "." or ".." ||
+            relative.StartsWith($"..{Path.DirectorySeparatorChar}", StringComparison.Ordinal))
+            return null;
+        return Path.GetFullPath(directory);
     }
 
     /// <summary>Turn a listed-but-inactive plugin on. When its files are already deployed
@@ -608,7 +716,7 @@ public sealed class PluginJobsService(
         }, "Plugins", "List", "Community");
     }
 
-    private static string DeriveCategory(IMediaPagerPlugin plugin) => plugin switch
+    internal static string DeriveCategory(IMediaPagerPlugin plugin) => plugin switch
     {
         IEmailProviderPlugin => "email",
         ISubtitleProviderPlugin => "subtitles",
@@ -616,6 +724,7 @@ public sealed class PluginJobsService(
         IMetadataProviderPlugin => "metadata",
         IStreamProviderPlugin => "stream",
         IPluginActions => "actions",
+        IAgentPlugin => "agents",
         IPluginInterface => "interface",
         _ => "other",
     };
@@ -623,7 +732,7 @@ public sealed class PluginJobsService(
     // The capability vocabulary is shared with the discovery manifest ("types") and the
     // management screen; a manifest claim is only trusted when the loaded plugin actually
     // implements that interface.
-    private static string[] CapabilitiesOf(IMediaPagerPlugin plugin) => new[]
+    internal static string[] CapabilitiesOf(IMediaPagerPlugin plugin) => new[]
     {
         plugin is IStreamProviderPlugin ? "stream" : null,
         plugin is IMetadataProviderPlugin ? "metadata" : null,
@@ -631,6 +740,7 @@ public sealed class PluginJobsService(
         plugin is ISubtitleProviderPlugin ? "subtitles" : null,
         plugin is IEmailProviderPlugin ? "email" : null,
         plugin is IPluginActions ? "actions" : null,
+        plugin is IAgentPlugin ? "agents" : null,
         plugin is IPluginInterface ? "interface" : null,
     }.Where(capability => capability is not null).ToArray()!;
 
@@ -804,6 +914,8 @@ public sealed class PluginJobsService(
         public bool AlreadyDeployed() =>
             Assembly is not null && File.Exists(Path.Combine(Directory, Assembly, $"{Assembly}.dll"));
     }
+
+    private sealed record InstalledCommunityPlugin(PluginManifest Manifest, string Directory);
 
     private sealed class PluginJobState
     {

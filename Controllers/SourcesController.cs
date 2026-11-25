@@ -15,6 +15,7 @@ namespace MediaPager.App.Api.Controllers;
 public sealed class SourcesController(
     PluginRegistry registry,
     IPluginSettingsRepository pluginSettings,
+    PluginContentAccessService contentAccess,
     StreamSessionState sessions,
     IConfiguration configuration,
     PluginInstaller installer,
@@ -48,6 +49,7 @@ public sealed class SourcesController(
         if (plugin is IMetadataProviderPlugin) return "metadata";
         if (plugin is IStreamProviderPlugin) return "stream";
         if (plugin is IPluginActions) return "actions";
+        if (plugin is IAgentPlugin) return "agents";
         if (plugin is IPluginInterface) return "interface";
         return "other";
     }
@@ -101,6 +103,7 @@ public sealed class SourcesController(
                 plugin is ISubtitleProviderPlugin ? "subtitles" : null,
                 plugin is IEmailProviderPlugin ? "email" : null,
                 plugin is IPluginActions ? "actions" : null,
+                plugin is IAgentPlugin ? "agents" : null,
                 plugin is IPluginInterface ? "interface" : null,
             }.Where(capability => capability is not null).ToArray(),
             streamMode = plugin is IStreamProviderPlugin stream
@@ -118,10 +121,21 @@ public sealed class SourcesController(
                     required = setting.Required,
                     secret = setting.Secret,
                     defaultValue = setting.Default,
+                    superAdminOnly = setting.SuperAdminOnly,
+                    hideFromGenericUi = setting.HideFromGenericUi,
                     catalogTypeSlug = setting.CatalogTypeSlug,
                     group = setting.Group,
                     description = setting.Description,
                     placeholder = setting.Placeholder,
+                }).ToArray()
+                : Array.Empty<object>(),
+            userSettings = plugin is IPluginUserSettingsSchema userSettingsSchema
+                ? userSettingsSchema.UserSettings.Select(preference => (object)new
+                {
+                    key = preference.Key,
+                    label = preference.Label,
+                    description = preference.Description,
+                    defaultValue = preference.DefaultValue,
                 }).ToArray()
                 : Array.Empty<object>(),
             actions = await ActionPayloadAsync(plugin, cancellationToken),
@@ -148,7 +162,46 @@ public sealed class SourcesController(
         try
         {
             var result = await provider.BrowseAsync(key, query, page, cancellationToken);
-            return Ok(result);
+            var visibleItems = new List<BrowseItem>(result.Items.Count);
+            foreach (var item in result.Items)
+                if (await contentAccess.CanAccessAsync(provider, item.RequiredScope, User, cancellationToken))
+                    visibleItems.Add(item);
+            return Ok(result with { Items = visibleItems });
+        }
+        catch (PluginOperationException exception)
+        {
+            return PluginErrorResponses.ToProblem(exception.Error);
+        }
+        catch (Exception exception)
+        {
+            return Problem($"Source '{key}' browse failed: {exception.Message}", statusCode: StatusCodes.Status502BadGateway);
+        }
+    }
+
+    // Packaged plugin UIs may browse only sources declared by their own plugin. The parent
+    // iframe bridge allowlists this path and attaches the user's token; the plugin ID check
+    // here is the server-side ownership boundary.
+    [HttpGet("/plugins/{pluginKey}/sources/{key}/browse")]
+    public async Task<IActionResult> BrowseFromPluginUi(
+        string pluginKey,
+        string key,
+        [FromQuery] string? query,
+        [FromQuery] int page = 1,
+        CancellationToken cancellationToken = default)
+    {
+        if (page < 1) page = 1;
+        var (provider, _) = FindPluginStreamSource(pluginKey, key);
+        if (provider is null)
+            return NotFound(Problem($"Plugin '{pluginKey}' does not own source '{key}'.", statusCode: StatusCodes.Status404NotFound));
+
+        try
+        {
+            var result = await provider.BrowseAsync(key, query, page, cancellationToken);
+            var visibleItems = new List<BrowseItem>(result.Items.Count);
+            foreach (var item in result.Items)
+                if (await contentAccess.CanAccessAsync(provider, item.RequiredScope, User, cancellationToken))
+                    visibleItems.Add(item);
+            return Ok(result with { Items = visibleItems });
         }
         catch (PluginOperationException exception)
         {
@@ -173,7 +226,37 @@ public sealed class SourcesController(
             var details = await provider.GetDetailsAsync(key, externalId, cancellationToken);
             if (details is null)
                 return NotFound(Problem($"Source '{key}' has no title '{externalId}'.", statusCode: StatusCodes.Status404NotFound));
+            if (!await contentAccess.CanAccessAsync(provider, details.RequiredScope, User, cancellationToken))
+                return NotFound(Problem($"Source '{key}' has no title '{externalId}'.", statusCode: StatusCodes.Status404NotFound));
             return Ok(details);
+        }
+        catch (PluginOperationException exception)
+        {
+            return PluginErrorResponses.ToProblem(exception.Error);
+        }
+        catch (Exception exception)
+        {
+            return Problem($"Source '{key}' details failed: {exception.Message}", statusCode: StatusCodes.Status502BadGateway);
+        }
+    }
+
+    [HttpGet("/plugins/{pluginKey}/sources/{key}/details/{externalId}")]
+    public async Task<IActionResult> DetailsFromPluginUi(
+        string pluginKey,
+        string key,
+        string externalId,
+        CancellationToken cancellationToken)
+    {
+        var (provider, _) = FindPluginStreamSource(pluginKey, key);
+        if (provider is null)
+            return NotFound(Problem($"Plugin '{pluginKey}' does not own source '{key}'.", statusCode: StatusCodes.Status404NotFound));
+
+        try
+        {
+            var details = await provider.GetDetailsAsync(key, externalId, cancellationToken);
+            return details is null || !await contentAccess.CanAccessAsync(provider, details.RequiredScope, User, cancellationToken)
+                ? NotFound(Problem($"Source '{key}' has no title '{externalId}'.", statusCode: StatusCodes.Status404NotFound))
+                : Ok(details);
         }
         catch (PluginOperationException exception)
         {
@@ -194,6 +277,7 @@ public sealed class SourcesController(
         string externalId,
         [FromQuery] int? season,
         [FromQuery] int? episode,
+        [FromQuery] string? streamVariantId,
         [FromQuery] bool forceProxy = false,
         CancellationToken cancellationToken = default)
     {
@@ -204,7 +288,10 @@ public sealed class SourcesController(
         StreamResult? result;
         try
         {
-            var request = new StreamResolveRequest(key, externalId, source.Kind, season, episode);
+            var request = new StreamResolveRequest(key, externalId, source.Kind, season, episode)
+            {
+                StreamVariantId = string.IsNullOrWhiteSpace(streamVariantId) ? null : streamVariantId,
+            };
             result = await provider.ResolveAsync(request, cancellationToken);
         }
         catch (PluginOperationException exception)
@@ -217,6 +304,9 @@ public sealed class SourcesController(
         }
 
         if (result is null)
+            return NotFound(Problem($"Source '{key}' could not resolve '{externalId}'.", statusCode: StatusCodes.Status404NotFound));
+
+        if (!await contentAccess.CanAccessAsync(provider, result.RequiredScope, User, cancellationToken))
             return NotFound(Problem($"Source '{key}' could not resolve '{externalId}'.", statusCode: StatusCodes.Status404NotFound));
 
         if (!await StreamingService.IsSafeStreamUri(result.UpstreamUri, cancellationToken))
@@ -331,6 +421,11 @@ public sealed class SourcesController(
             return NotFound(Problem($"No plugin '{key}' is loaded.", statusCode: StatusCodes.Status404NotFound));
 
         var settingsKey = PluginSettingsKey(plugin);
+        var restrictedFields = schema.Where(field => field.SuperAdminOnly && values.ContainsKey(field.Key)).ToArray();
+        if (restrictedFields.Length > 0 && !User.FindAll("scope").Any(claim =>
+                string.Equals(ScopeSecurityCatalog.CanonicalizeLegacy(claim.Value), "admin:super", StringComparison.OrdinalIgnoreCase)))
+            return Forbid();
+
         var stored = await pluginSettings.GetAllAsync(settingsKey, cancellationToken);
         var errors = new List<string>();
         foreach (var field in schema)
@@ -419,6 +514,7 @@ public sealed class SourcesController(
                 plugin is ISubtitleProviderPlugin ? "subtitles" : null,
                 plugin is IEmailProviderPlugin ? "email" : null,
                 plugin is IPluginActions ? "actions" : null,
+                plugin is IAgentPlugin ? "agents" : null,
                 plugin is IPluginInterface ? "interface" : null,
             }.Where(capability => capability is not null).ToArray(),
             streamMode = plugin is IStreamProviderPlugin stream
@@ -436,6 +532,7 @@ public sealed class SourcesController(
                     required = setting.Required,
                     secret = setting.Secret,
                     defaultValue = setting.Default,
+                    superAdminOnly = setting.SuperAdminOnly,
                     catalogTypeSlug = setting.CatalogTypeSlug,
                 }).ToArray()
                 : Array.Empty<object>(),
@@ -666,9 +763,8 @@ public sealed class SourcesController(
             ? Ok(job)
             : NotFound(Problem($"No plugin job '{id}'.", statusCode: StatusCodes.Status404NotFound));
 
-    // POST /plugins/{key}/disable — turn an official plugin off: remove it from
-    // Plugins:Required:Official (appsettings.json) and unregister it live. Community
-    // plugins are uninstalled (DELETE) instead of disabled.
+    // POST /plugins/{key}/disable — unload a plugin while preserving its installed files.
+    // Community plugins get a .disabled marker; official plugins leave Required:Official.
     [HttpPost("/plugins/{key}/disable")]
     [Authorize(Policy = "SuperAdmin")]
     public IActionResult DisablePlugin(string key)
@@ -697,7 +793,27 @@ public sealed class SourcesController(
             string.Equals(candidate.Descriptor.Id, key, StringComparison.OrdinalIgnoreCase) ||
             string.Equals(PluginSettingsKey(candidate), key, StringComparison.OrdinalIgnoreCase));
         if (plugin is null)
-            return NotFound(Problem($"No plugin '{key}' is loaded.", statusCode: StatusCodes.Status404NotFound));
+        {
+            try
+            {
+                var name = pluginJobs.UninstallDisabledCommunityPlugin(key, removeDependencies);
+                apiRestartCoordinator.RestartAfterResponse(Response);
+                return Accepted(new
+                {
+                    message = $"Removed {name}; the API is restarting.",
+                    restarting = true,
+                    removedDependencies = Array.Empty<string>(),
+                });
+            }
+            catch (KeyNotFoundException exception)
+            {
+                return NotFound(Problem(exception.Message, statusCode: StatusCodes.Status404NotFound));
+            }
+            catch (InvalidOperationException exception)
+            {
+                return Conflict(Problem(exception.Message, statusCode: StatusCodes.Status409Conflict));
+            }
+        }
         if (!registry.IsCommunity(plugin))
             return BadRequest(Problem($"'{plugin.Descriptor.Name}' is an official plugin and cannot be uninstalled.", statusCode: StatusCodes.Status400BadRequest));
         if (PluginCatalog.IsSystemRequired(configuration, plugin.Descriptor.Id))
@@ -846,6 +962,20 @@ public sealed class SourcesController(
                 string.Equals(descriptor.Key, key, StringComparison.OrdinalIgnoreCase));
             if (source is not null)
                 return (provider, source);
+        }
+        return (null, null);
+    }
+
+    private (IStreamProviderPlugin? Provider, SourceDescriptor? Source) FindPluginStreamSource(string pluginKey, string sourceKey)
+    {
+        foreach (var provider in registry.ResolveAll<IStreamProviderPlugin>())
+        {
+            var ownsPlugin = string.Equals(provider.Descriptor.Id, pluginKey, StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(PluginSettingsKey(provider), pluginKey, StringComparison.OrdinalIgnoreCase);
+            if (!ownsPlugin) continue;
+            var source = provider.Sources.FirstOrDefault(candidate =>
+                string.Equals(candidate.Key, sourceKey, StringComparison.OrdinalIgnoreCase));
+            if (source is not null) return (provider, source);
         }
         return (null, null);
     }

@@ -1,6 +1,7 @@
 using System.Security.Claims;
 using System.Security.Cryptography;
 using System.Text;
+using System.Net.Http;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.DataProtection;
@@ -9,6 +10,7 @@ using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
 using MediaPager.App.Api.Controllers;
+using MediaPager.App.Api.Services.Agents;
 using MediaPager.App.Core.Services;
 using NoBugsGiven.Quasar.Interop;
 
@@ -321,6 +323,7 @@ builder.Services.AddScoped<GitSshPrivateKeyStore>();
 builder.Services.AddSingleton<IGitPrivateKeyProvider, GitSshPrivateKeyProvider>();
 builder.Services.AddSingleton<IDataProtectionProvider>(bootstrapDataProtectionProvider);
 builder.Services.AddSingleton<IPluginSettingsValueProtector, PluginSettingsValueProtector>();
+builder.Services.AddSingleton<IPluginDataValueProtector, PluginDataValueProtector>();
 builder.Services.AddSingleton(storageLayout);
 builder.Services.AddSingleton<StreamSessionState>();
 builder.Services.AddSingleton<ArtworkStorage>();
@@ -328,7 +331,16 @@ builder.Services.AddSingleton<LocalFileSessionState>();
 builder.Services.AddSingleton<PluginRegistry>();
 builder.Services.AddSingleton<IPluginHost>(services => services.GetRequiredService<PluginRegistry>());
 builder.Services.AddSingleton<PluginActivityStore>();
+// Agent plugins can be singletons, so the scan store opens its own DbContext scopes.
+builder.Services.AddSingleton<ICatalogScanStore, CatalogScanStore>();
+builder.Services.AddSingleton<AgentRuntimeService>();
+builder.Services.AddHostedService(services => services.GetRequiredService<AgentRuntimeService>());
 builder.Services.AddSingleton<IPluginSettingsRepository, PluginSettingsService>();
+builder.Services.AddSingleton<IPluginDataRepository, PluginDataRepository>();
+builder.Services.AddSingleton<IPluginPublicHttpBroker, PluginPublicHttpBroker>();
+builder.Services.AddScoped<PluginContentAccessService>();
+builder.Services.AddHttpClient("plugin-public-fetch", client => client.Timeout = Timeout.InfiniteTimeSpan)
+    .ConfigurePrimaryHttpMessageHandler(PluginPublicHttpBroker.CreateHandler);
 builder.Services.AddSingleton<ManagedToolDirectory>();
 builder.Services.AddSingleton<ManagedToolsBootstrapState>();
 builder.Services.AddHttpClient<FfmpegToolInstaller>(client => client.Timeout = Timeout.InfiniteTimeSpan);

@@ -29,16 +29,49 @@ public sealed class PluginWorkerFactory(ILoggerFactory loggerFactory) : IPluginW
         var emailSender = hostCapabilities.Contains(PluginHostCapabilityNames.EmailSending)
             ? hostServices.GetService<IPluginEmailSender>()
             : null;
+        var catalogScanStore = hostCapabilities.Contains(PluginHostCapabilityNames.CatalogScanning)
+            ? hostServices.GetService<ICatalogScanStore>()
+            : null;
+        var pluginDataRepository = hostCapabilities.Contains(PluginHostCapabilityNames.PluginData)
+            ? hostServices.GetService<IPluginDataRepository>()
+            : null;
+        var publicHttpBroker = hostCapabilities.Contains(PluginHostCapabilityNames.PublicHttpFetch)
+            ? hostServices.GetService<IPluginPublicHttpBroker>()
+            : null;
         var workerDescription = StartWorker(
-            pluginDirectory, pluginId, settings, activity, browser, mediaTools, emailSender, activityStore, hostCapabilities);
+            pluginDirectory, pluginId, settings, activity, browser, mediaTools, emailSender,
+            catalogScanStore, pluginDataRepository, publicHttpBroker, activityStore, hostCapabilities);
         var lease = new WorkerLease(
-            () => GetOrRestartWorker(pluginDirectory, pluginId, settings, activity, browser, mediaTools, emailSender, activityStore, hostCapabilities),
+            () => GetOrRestartWorker(pluginDirectory, pluginId, settings, activity, browser, mediaTools,
+                emailSender, catalogScanStore, pluginDataRepository, publicHttpBroker, activityStore, hostCapabilities),
             () => StopWorker(pluginId));
 
         if (workerDescription.IsStreamProvider)
-            return [new PluginWorkerStreamProviderProxy(pluginDirectory, workerDescription, lease.GetWorker, lease.Dispose)];
+        {
+            if (workerDescription.HasSearchProvider)
+            {
+                return [workerDescription.HasAgents
+                    ? new PluginWorkerStreamSearchAgentProxy(pluginDirectory, workerDescription, lease.GetWorker, lease.Dispose)
+                    : new PluginWorkerStreamSearchProxy(pluginDirectory, workerDescription, lease.GetWorker, lease.Dispose)];
+            }
+            return [workerDescription.HasAgents
+                ? new PluginWorkerStreamAgentProxy(pluginDirectory, workerDescription, lease.GetWorker, lease.Dispose)
+                : new PluginWorkerStreamProviderProxy(pluginDirectory, workerDescription, lease.GetWorker, lease.Dispose)];
+        }
+        if (workerDescription.HasSearchProvider)
+        {
+            return [workerDescription.HasAgents
+                ? new PluginWorkerSearchAgentProxy(pluginDirectory, workerDescription, lease.GetWorker, lease.Dispose)
+                : new PluginWorkerSearchProxy(pluginDirectory, workerDescription, lease.GetWorker, lease.Dispose)];
+        }
         if (workerDescription.HasActions)
-            return [new PluginWorkerActionProxy(pluginDirectory, workerDescription, lease.GetWorker, lease.Dispose)];
+        {
+            return [workerDescription.HasAgents
+                ? new PluginWorkerActionAgentProxy(pluginDirectory, workerDescription, lease.GetWorker, lease.Dispose)
+                : new PluginWorkerActionProxy(pluginDirectory, workerDescription, lease.GetWorker, lease.Dispose)];
+        }
+        if (workerDescription.HasAgents)
+            return [new PluginWorkerAgentProxy(pluginDirectory, workerDescription, lease.GetWorker, lease.Dispose)];
         lease.Dispose();
         throw new InvalidOperationException($"Worker '{pluginId}' exposes no supported host capability.");
     }
@@ -51,6 +84,9 @@ public sealed class PluginWorkerFactory(ILoggerFactory loggerFactory) : IPluginW
         IBrowserAutomationBroker browser,
         IMediaToolBroker mediaTools,
         IPluginEmailSender? emailSender,
+        ICatalogScanStore? catalogScanStore,
+        IPluginDataRepository? pluginDataRepository,
+        IPluginPublicHttpBroker? publicHttpBroker,
         PluginActivityStore activityStore,
         IReadOnlySet<string> hostCapabilities)
     {
@@ -65,7 +101,8 @@ public sealed class PluginWorkerFactory(ILoggerFactory loggerFactory) : IPluginW
                 existing.Dispose();
             }
 
-            var worker = CreateWorker(pluginDirectory, pluginId, settings, activity, browser, mediaTools, emailSender, activityStore, hostCapabilities);
+            var worker = CreateWorker(pluginDirectory, pluginId, settings, activity, browser, mediaTools,
+                emailSender, catalogScanStore, pluginDataRepository, publicHttpBroker, activityStore, hostCapabilities);
             try
             {
                 var description = worker.StartAndDescribe();
@@ -91,6 +128,9 @@ public sealed class PluginWorkerFactory(ILoggerFactory loggerFactory) : IPluginW
         IBrowserAutomationBroker browser,
         IMediaToolBroker mediaTools,
         IPluginEmailSender? emailSender,
+        ICatalogScanStore? catalogScanStore,
+        IPluginDataRepository? pluginDataRepository,
+        IPluginPublicHttpBroker? publicHttpBroker,
         PluginActivityStore activityStore,
         IReadOnlySet<string> hostCapabilities)
     {
@@ -105,7 +145,8 @@ public sealed class PluginWorkerFactory(ILoggerFactory loggerFactory) : IPluginW
                 worker.Dispose();
             }
 
-            var replacement = CreateWorker(pluginDirectory, pluginId, settings, activity, browser, mediaTools, emailSender, activityStore, hostCapabilities);
+            var replacement = CreateWorker(pluginDirectory, pluginId, settings, activity, browser, mediaTools,
+                emailSender, catalogScanStore, pluginDataRepository, publicHttpBroker, activityStore, hostCapabilities);
             try
             {
                 var description = replacement.StartAndDescribe();
@@ -130,12 +171,18 @@ public sealed class PluginWorkerFactory(ILoggerFactory loggerFactory) : IPluginW
         IBrowserAutomationBroker browser,
         IMediaToolBroker mediaTools,
         IPluginEmailSender? emailSender,
+        ICatalogScanStore? catalogScanStore,
+        IPluginDataRepository? pluginDataRepository,
+        IPluginPublicHttpBroker? publicHttpBroker,
         PluginActivityStore activityStore,
         IReadOnlySet<string> hostCapabilities) =>
         new(pluginDirectory, pluginId, settings, activity, browser, mediaTools, emailSender,
             hostCapabilities,
             jobId => { activityStore.CancelJob(jobId); },
-            loggerFactory.CreateLogger($"PluginWorker.{pluginId}"));
+            loggerFactory.CreateLogger($"PluginWorker.{pluginId}"),
+            catalogScanStore,
+            pluginDataRepository,
+            publicHttpBroker);
 
     private void StopWorker(string pluginId)
     {
@@ -187,11 +234,11 @@ public sealed class PluginWorkerFactory(ILoggerFactory loggerFactory) : IPluginW
     }
 }
 
-internal sealed class PluginWorkerStreamProviderProxy(
+internal class PluginWorkerStreamProviderProxy(
     string pluginDirectory,
     PluginWorkerDescription description,
     Func<PluginWorkerProcess> getWorker,
-    Action stopWorker) : IStreamProviderPlugin, IPluginSettingsSchema, IPluginActions, IPluginScopeSchema, IPluginUiAssetProvider, IDisposable
+    Action stopWorker) : IStreamProviderPlugin, IPluginSettingsSchema, IPluginActions, IPluginNavigation, IPluginScopeSchema, IPluginUserSettingsSchema, IPluginUiAssetProvider, IDisposable
 {
     public PluginDescriptor Descriptor => description.Descriptor;
     public string PluginUiDirectory => Path.Combine(pluginDirectory, "ui");
@@ -201,10 +248,17 @@ internal sealed class PluginWorkerStreamProviderProxy(
     public IReadOnlyList<PluginSettingDefinition> Settings => description.Settings;
     public IReadOnlyList<PluginActionDescriptor> Actions => description.Actions;
     public IReadOnlyList<PluginScopeDefinition> Scopes => description.Scopes;
+    public IReadOnlyList<PluginUserPreferenceDefinition> UserSettings => description.UserSettings ?? [];
+    public PluginSettingsNav? SettingsNav => description.SettingsNav;
+    public IReadOnlyList<PluginMenuEntry> MainNav => description.MainNav;
+    protected Func<PluginWorkerProcess> WorkerProvider => getWorker;
 
-    public async Task<IReadOnlyList<PluginActionDescriptor>> GetActionsAsync(CancellationToken cancellationToken) =>
-        await getWorker().InvokeAsync<IReadOnlyList<PluginActionDescriptor>>("actions.list", new { }, cancellationToken)
-        ?? Array.Empty<PluginActionDescriptor>();
+    public async Task<IReadOnlyList<PluginActionDescriptor>> GetActionsAsync(CancellationToken cancellationToken)
+    {
+        if (!description.HasActions) return description.Actions;
+        return await getWorker().InvokeAsync<IReadOnlyList<PluginActionDescriptor>>(
+            "actions.list", new { }, cancellationToken) ?? Array.Empty<PluginActionDescriptor>();
+    }
 
     public async Task InvokeActionAsync(PluginActionContext context, CancellationToken cancellationToken) =>
         _ = await getWorker().InvokeAsync<bool>("actions.invoke", new PluginWorkerActionArguments(context), cancellationToken);
@@ -234,26 +288,168 @@ internal sealed class PluginWorkerStreamProviderProxy(
     public void Dispose() => stopWorker();
 }
 
-internal sealed class PluginWorkerActionProxy(
+internal class PluginWorkerActionProxy(
     string pluginDirectory,
     PluginWorkerDescription description,
     Func<PluginWorkerProcess> getWorker,
-    Action stopWorker) : IMediaPagerPlugin, IPluginActions, IPluginSettingsSchema, IPluginNavigation, IPluginScopeSchema, IPluginUiAssetProvider, IDisposable
+    Action stopWorker) : IMediaPagerPlugin, IPluginActions, IPluginSettingsSchema, IPluginNavigation, IPluginScopeSchema, IPluginUserSettingsSchema, IPluginUiAssetProvider, IDisposable
 {
     public PluginDescriptor Descriptor => description.Descriptor;
     public string PluginUiDirectory => Path.Combine(pluginDirectory, "ui");
     public IReadOnlyList<PluginActionDescriptor> Actions => description.Actions;
     public IReadOnlyList<PluginSettingDefinition> Settings => description.Settings;
     public IReadOnlyList<PluginScopeDefinition> Scopes => description.Scopes;
+    public IReadOnlyList<PluginUserPreferenceDefinition> UserSettings => description.UserSettings ?? [];
     public PluginSettingsNav? SettingsNav => description.SettingsNav;
     public IReadOnlyList<PluginMenuEntry> MainNav => description.MainNav;
+    protected Func<PluginWorkerProcess> WorkerProvider => getWorker;
 
-    public async Task<IReadOnlyList<PluginActionDescriptor>> GetActionsAsync(CancellationToken cancellationToken) =>
-        await getWorker().InvokeAsync<IReadOnlyList<PluginActionDescriptor>>("actions.list", new { }, cancellationToken)
-        ?? Array.Empty<PluginActionDescriptor>();
+    public async Task<IReadOnlyList<PluginActionDescriptor>> GetActionsAsync(CancellationToken cancellationToken)
+    {
+        if (!description.HasActions) return description.Actions;
+        return await getWorker().InvokeAsync<IReadOnlyList<PluginActionDescriptor>>(
+            "actions.list", new { }, cancellationToken) ?? Array.Empty<PluginActionDescriptor>();
+    }
 
     public async Task InvokeActionAsync(PluginActionContext context, CancellationToken cancellationToken) =>
         _ = await getWorker().InvokeAsync<bool>("actions.invoke", new PluginWorkerActionArguments(context), cancellationToken);
 
     public void Dispose() => stopWorker();
+}
+
+/// <summary>Shared agent RPC implementation for the worker proxies.</summary>
+internal static class PluginWorkerAgents
+{
+    public static async Task<IReadOnlyList<AgentDescriptor>> ListAsync(
+        Func<PluginWorkerProcess> getWorker,
+        CancellationToken cancellationToken) =>
+        await getWorker().InvokeAsync<IReadOnlyList<AgentDescriptor>>("agents.list", new { }, cancellationToken)
+        ?? [];
+
+    public static async Task<AgentRunResult> RunAsync(
+        Func<PluginWorkerProcess> getWorker,
+        AgentRunRequest request,
+        CancellationToken cancellationToken) =>
+        await getWorker().InvokeAsync<AgentRunResult>(
+            "agents.run", new PluginWorkerAgentRunArguments(request), cancellationToken)
+        ?? throw new InvalidOperationException("The plugin worker returned no agent run result.");
+}
+
+internal sealed class PluginWorkerAgentProxy(
+    string pluginDirectory,
+    PluginWorkerDescription description,
+    Func<PluginWorkerProcess> getWorker,
+    Action stopWorker) : IAgentPlugin, IPluginSettingsSchema, IPluginNavigation, IPluginScopeSchema, IPluginUserSettingsSchema, IPluginUiAssetProvider, IDisposable
+{
+    public PluginDescriptor Descriptor => description.Descriptor;
+    public string PluginUiDirectory => Path.Combine(pluginDirectory, "ui");
+    public IReadOnlyList<PluginSettingDefinition> Settings => description.Settings;
+    public IReadOnlyList<PluginScopeDefinition> Scopes => description.Scopes;
+    public IReadOnlyList<PluginUserPreferenceDefinition> UserSettings => description.UserSettings ?? [];
+    public PluginSettingsNav? SettingsNav => description.SettingsNav;
+    public IReadOnlyList<PluginMenuEntry> MainNav => description.MainNav;
+
+    public Task<IReadOnlyList<AgentDescriptor>> GetAgentsAsync(CancellationToken cancellationToken = default) =>
+        PluginWorkerAgents.ListAsync(getWorker, cancellationToken);
+
+    public Task<AgentRunResult> RunAsync(AgentRunRequest request, CancellationToken cancellationToken = default) =>
+        PluginWorkerAgents.RunAsync(getWorker, request, cancellationToken);
+
+    public void Dispose() => stopWorker();
+}
+
+internal class PluginWorkerSearchProxy(
+    string pluginDirectory,
+    PluginWorkerDescription description,
+    Func<PluginWorkerProcess> getWorker,
+    Action stopWorker) : IMediaPagerPlugin, ISearchProviderPlugin, IPluginSettingsSchema, IPluginActions, IPluginNavigation, IPluginScopeSchema, IPluginUserSettingsSchema, IPluginUiAssetProvider, IDisposable
+{
+    public PluginDescriptor Descriptor => description.Descriptor;
+    public string PluginUiDirectory => Path.Combine(pluginDirectory, "ui");
+    public IReadOnlyList<PluginSettingDefinition> Settings => description.Settings;
+    public IReadOnlyList<PluginActionDescriptor> Actions => description.Actions;
+    public IReadOnlyList<PluginScopeDefinition> Scopes => description.Scopes;
+    public IReadOnlyList<PluginUserPreferenceDefinition> UserSettings => description.UserSettings ?? [];
+    public PluginSettingsNav? SettingsNav => description.SettingsNav;
+    public IReadOnlyList<PluginMenuEntry> MainNav => description.MainNav;
+    protected Func<PluginWorkerProcess> WorkerProvider => getWorker;
+
+    public async Task<IReadOnlyList<ProviderSearchHit>> SearchAsync(SearchRequest request, CancellationToken cancellationToken) =>
+        await getWorker().InvokeAsync<IReadOnlyList<ProviderSearchHit>>(
+            "search.run", new PluginWorkerSearchArguments(request), cancellationToken) ?? [];
+
+    public async Task<IReadOnlyList<PluginActionDescriptor>> GetActionsAsync(CancellationToken cancellationToken)
+    {
+        if (!description.HasActions) return description.Actions;
+        return await getWorker().InvokeAsync<IReadOnlyList<PluginActionDescriptor>>(
+            "actions.list", new { }, cancellationToken) ?? Array.Empty<PluginActionDescriptor>();
+    }
+
+    public async Task InvokeActionAsync(PluginActionContext context, CancellationToken cancellationToken) =>
+        _ = await getWorker().InvokeAsync<bool>("actions.invoke", new PluginWorkerActionArguments(context), cancellationToken);
+
+    public void Dispose() => stopWorker();
+}
+
+internal sealed class PluginWorkerSearchAgentProxy(
+    string pluginDirectory,
+    PluginWorkerDescription description,
+    Func<PluginWorkerProcess> getWorker,
+    Action stopWorker) : PluginWorkerSearchProxy(pluginDirectory, description, getWorker, stopWorker), IAgentPlugin
+{
+    public Task<IReadOnlyList<AgentDescriptor>> GetAgentsAsync(CancellationToken cancellationToken = default) =>
+        PluginWorkerAgents.ListAsync(WorkerProvider, cancellationToken);
+
+    public Task<AgentRunResult> RunAsync(AgentRunRequest request, CancellationToken cancellationToken = default) =>
+        PluginWorkerAgents.RunAsync(WorkerProvider, request, cancellationToken);
+}
+
+internal sealed class PluginWorkerStreamAgentProxy(
+    string pluginDirectory,
+    PluginWorkerDescription description,
+    Func<PluginWorkerProcess> getWorker,
+    Action stopWorker) : PluginWorkerStreamProviderProxy(pluginDirectory, description, getWorker, stopWorker), IAgentPlugin
+{
+    public Task<IReadOnlyList<AgentDescriptor>> GetAgentsAsync(CancellationToken cancellationToken = default) =>
+        PluginWorkerAgents.ListAsync(WorkerProvider, cancellationToken);
+
+    public Task<AgentRunResult> RunAsync(AgentRunRequest request, CancellationToken cancellationToken = default) =>
+        PluginWorkerAgents.RunAsync(WorkerProvider, request, cancellationToken);
+}
+
+internal class PluginWorkerStreamSearchProxy(
+    string pluginDirectory,
+    PluginWorkerDescription description,
+    Func<PluginWorkerProcess> getWorker,
+    Action stopWorker) : PluginWorkerStreamProviderProxy(pluginDirectory, description, getWorker, stopWorker), ISearchProviderPlugin
+{
+    public async Task<IReadOnlyList<ProviderSearchHit>> SearchAsync(SearchRequest request, CancellationToken cancellationToken) =>
+        await WorkerProvider().InvokeAsync<IReadOnlyList<ProviderSearchHit>>(
+            "search.run", new PluginWorkerSearchArguments(request), cancellationToken) ?? [];
+}
+
+internal sealed class PluginWorkerStreamSearchAgentProxy(
+    string pluginDirectory,
+    PluginWorkerDescription description,
+    Func<PluginWorkerProcess> getWorker,
+    Action stopWorker) : PluginWorkerStreamSearchProxy(pluginDirectory, description, getWorker, stopWorker), IAgentPlugin
+{
+    public Task<IReadOnlyList<AgentDescriptor>> GetAgentsAsync(CancellationToken cancellationToken = default) =>
+        PluginWorkerAgents.ListAsync(WorkerProvider, cancellationToken);
+
+    public Task<AgentRunResult> RunAsync(AgentRunRequest request, CancellationToken cancellationToken = default) =>
+        PluginWorkerAgents.RunAsync(WorkerProvider, request, cancellationToken);
+}
+
+internal sealed class PluginWorkerActionAgentProxy(
+    string pluginDirectory,
+    PluginWorkerDescription description,
+    Func<PluginWorkerProcess> getWorker,
+    Action stopWorker) : PluginWorkerActionProxy(pluginDirectory, description, getWorker, stopWorker), IAgentPlugin
+{
+    public Task<IReadOnlyList<AgentDescriptor>> GetAgentsAsync(CancellationToken cancellationToken = default) =>
+        PluginWorkerAgents.ListAsync(WorkerProvider, cancellationToken);
+
+    public Task<AgentRunResult> RunAsync(AgentRunRequest request, CancellationToken cancellationToken = default) =>
+        PluginWorkerAgents.RunAsync(WorkerProvider, request, cancellationToken);
 }

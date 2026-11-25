@@ -9,7 +9,10 @@ public sealed record ScopeSecurityDefinition(
     string Claim,
     string Label,
     string Description,
-    IReadOnlySet<string> Permissions);
+    IReadOnlySet<string> Permissions)
+{
+    public string? GlobalAccessSettingKey { get; init; }
+}
 
 /// <summary>Loads the configured scope catalog. Scope names are display/assignment data;
 /// authorization is granted only through the permission identifiers recognized by the host.</summary>
@@ -86,7 +89,10 @@ public sealed class ScopeSecurityCatalog
                 var claim = $"{namespaceId}:{localId}";
                 if (!scopes.TryAdd(claim, new ScopeSecurityDefinition(
                         definition.Id, claim, definition.Label, definition.Description,
-                        new HashSet<string>(StringComparer.OrdinalIgnoreCase))))
+                        new HashSet<string>(StringComparer.OrdinalIgnoreCase))
+                    {
+                        GlobalAccessSettingKey = definition.GlobalAccessSettingKey,
+                    }))
                     throw new InvalidOperationException($"Plugin '{plugin.Descriptor.Id}' declares duplicate scope '{claim}'.");
             }
         }
